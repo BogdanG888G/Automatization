@@ -3,3 +3,4 @@ openpyxl
 pyodbc
 psycopg2-binary
 sqlalchemy
+pyxlsb

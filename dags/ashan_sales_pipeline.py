@@ -1,3 +1,6 @@
+import sys
+sys.path.append('/opt/airflow/scripts')
+
 from airflow import DAG
 from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
@@ -8,11 +11,10 @@ import shutil
 import logging
 from sqlalchemy import create_engine
 
-# === Импорты по новой структуре ===
 from common.utils import get_files_from_directory
-from common.convert_xlsx_to_csv import convert_xlsx_to_csv
+from common.convert_excel_to_csv import convert_excel_to_csv
 from common.call_stored_procedure import call_stored_procedure
-from x5.create_table_and_upload import create_table_and_upload
+from ashan.create_table_and_upload import create_table_and_upload
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,6 @@ ARCHIVE_DIR = "/opt/airflow/archive"
 DEFAULT_CONN_STR = "mssql+pyodbc://airflow_agent:123@host.docker.internal/Test?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
 
 def get_engine():
-    """Создаёт SQLAlchemy engine для MSSQL"""
     try:
         conn_str = Variable.get("MSSQL_CONN_STR")
     except KeyError:
@@ -33,41 +34,39 @@ def get_engine():
 @task
 def scan_files():
     files = get_files_from_directory(DATA_DIR)
-    # Фильтруем только X5-файлы (например, начинающиеся с "x5_")
-    x5_files = [f for f in files if os.path.basename(f).lower().startswith("x5_")]
-    logger.info(f"Файлы X5 для обработки: {x5_files}")
-    return x5_files
+    filtered = [f for f in files if os.path.basename(f).lower().startswith("ashan")]
+    logger.info(f"Ашан-файлы для обработки: {filtered}")
+    return filtered
 
 @task
 def process_file(file_path: str):
     try:
-        logger.info(f"Начинаем обработку файла X5: {file_path}")
+        logger.info(f"Начинаем обработку файла Ашан: {file_path}")
 
-        if file_path.endswith(".xlsx") or file_path.endswith(".xlsb"):
-            file_path = convert_xlsx_to_csv(file_path)
-
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ['.xlsx', '.xls', '.xlsb']:
+            file_path = convert_excel_to_csv(file_path)
 
         engine = get_engine()
-        table_name = create_table_and_upload(file_path, engine=engine)
-
-        call_stored_procedure("x5", engine=engine)
+        create_table_and_upload(file_path, engine=engine)
+        call_stored_procedure("ashan", engine=engine)
 
         if not os.path.exists(ARCHIVE_DIR):
             os.makedirs(ARCHIVE_DIR)
         shutil.move(file_path, os.path.join(ARCHIVE_DIR, os.path.basename(file_path)))
 
-        logger.info(f"Файл X5 успешно обработан и перемещён в архив: {file_path}")
+        logger.info(f"Файл Ашан успешно обработан и архивирован: {file_path}")
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке файла X5 {file_path}: {e}")
+        logger.error(f"Ошибка при обработке файла Ашан {file_path}: {e}")
         raise
 
 with DAG(
-    dag_id="x5_sales_pipeline",
+    dag_id="ashan_sales_pipeline",
     start_date=datetime(2025, 7, 7),
     schedule_interval="@daily",
     catchup=False,
-    tags=["x5", "sales"],
+    tags=["ashan", "sales"],
 ) as dag:
 
     start = EmptyOperator(task_id="start")

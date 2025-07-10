@@ -20,9 +20,15 @@ USER airflow
 ENV AIRFLOW_HOME=/opt/airflow
 ENV PATH="${AIRFLOW_HOME}/bin:${PATH}"
 
+# Добавляем папку scripts в PYTHONPATH
+ENV PYTHONPATH="${PYTHONPATH}:/opt/airflow/scripts"
+
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
 COPY entrypoint.sh /entrypoint.sh
+
+# Копируем весь проект (включая dags/ и scripts/)
+COPY . ${AIRFLOW_HOME}
 
 ENTRYPOINT ["/entrypoint.sh"]
