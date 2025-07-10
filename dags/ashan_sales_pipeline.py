@@ -41,7 +41,7 @@ def scan_files():
     allowed_ext = ['.csv', '.xlsx', '.xls', '.xlsb']
     filtered = [
         f for f in files
-        if os.path.basename(f).lower().startswith("ashan")
+        if os.path.basename(f).lower().startswith("aushan")
         and os.path.splitext(f)[1].lower() in allowed_ext
     ]
     logger.info(f"Ашан-файлы для обработки: {filtered}")

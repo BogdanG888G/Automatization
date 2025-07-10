@@ -1,3 +1,5 @@
+#TODO подправить readme.md!
+
 # Автоматизация загрузки данных в SQL Server с помощью Apache Airflow
 
 ![Apache Airflow](https://img.shields.io/badge/Apache%20Airflow-017CEE?style=for-the-badge&logo=Apache%20Airflow&logoColor=white)
