@@ -8,33 +8,50 @@ import shutil
 import logging
 from sqlalchemy import create_engine
 
-# === Импорты по новой структуре ===
 from common.utils import get_files_from_directory
-from common.convert_xlsx_to_csv import convert_xlsx_to_csv
-from common.call_stored_procedure import call_stored_procedure
+from common.convert_xlsx_to_csv import convert_excel_to_csv
 from x5.create_table_and_upload import create_table_and_upload
+from x5.convert_raw_to_stage import convert_raw_to_stage
 
 logger = logging.getLogger(__name__)
 
 DATA_DIR = "/opt/airflow/data"
 ARCHIVE_DIR = "/opt/airflow/archive"
 
-DEFAULT_CONN_STR = "mssql+pyodbc://airflow_agent:123@host.docker.internal/Test?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+DEFAULT_CONN_TEST = (
+    "mssql+pyodbc://airflow_agent:123@host.docker.internal/Test"
+    "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+)
+DEFAULT_CONN_STAGE = (
+    "mssql+pyodbc://airflow_agent:123@host.docker.internal/Stage"
+    "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+)
 
-def get_engine():
-    """Создаёт SQLAlchemy engine для MSSQL"""
+def get_engine_test():
     try:
-        conn_str = Variable.get("MSSQL_CONN_STR")
+        conn_str = Variable.get("MSSQL_CONN_STR_TEST")
     except KeyError:
-        logger.warning("Using default connection string")
-        conn_str = DEFAULT_CONN_STR
+        logger.warning("Using default connection string for TEST")
+        conn_str = DEFAULT_CONN_TEST
+    return create_engine(conn_str)
+
+def get_engine_stage():
+    try:
+        conn_str = Variable.get("MSSQL_CONN_STR_STAGE")
+    except KeyError:
+        logger.warning("Using default connection string for STAGE")
+        conn_str = DEFAULT_CONN_STAGE
     return create_engine(conn_str)
 
 @task
 def scan_files():
     files = get_files_from_directory(DATA_DIR)
-    # Фильтруем только X5-файлы (например, начинающиеся с "x5_")
-    x5_files = [f for f in files if os.path.basename(f).lower().startswith("x5_")]
+    allowed_ext = ['.csv', '.xlsx', '.xls', '.xlsb']
+    x5_files = [
+        f for f in files
+        if os.path.basename(f).lower().startswith("x5_")
+        and os.path.splitext(f)[1].lower() in allowed_ext
+    ]
     logger.info(f"Файлы X5 для обработки: {x5_files}")
     return x5_files
 
@@ -43,14 +60,22 @@ def process_file(file_path: str):
     try:
         logger.info(f"Начинаем обработку файла X5: {file_path}")
 
-        if file_path.endswith(".xlsx") or file_path.endswith(".xlsb"):
-            file_path = convert_xlsx_to_csv(file_path)
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ['.xlsx', '.xls', '.xlsb']:
+            file_path = convert_excel_to_csv(file_path)
 
+        engine_test = get_engine_test()
+        table_name = create_table_and_upload(file_path, engine=engine_test)
 
-        engine = get_engine()
-        table_name = create_table_and_upload(file_path, engine=engine)
+        # Для чтения из raw в Test и записи в Stage нужны оба engine
+        engine_stage = get_engine_stage()
+        convert_raw_to_stage(
+            table_name=table_name,
+            raw_engine=engine_test,
+            stage_engine=engine_stage,
+            stage_schema="x5"
+        )
 
-        call_stored_procedure("x5", engine=engine)
 
         if not os.path.exists(ARCHIVE_DIR):
             os.makedirs(ARCHIVE_DIR)
@@ -59,7 +84,7 @@ def process_file(file_path: str):
         logger.info(f"Файл X5 успешно обработан и перемещён в архив: {file_path}")
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке файла X5 {file_path}: {e}")
+        logger.error(f"Ошибка при обработке файла X5 {file_path}: {e}", exc_info=True)
         raise
 
 with DAG(
