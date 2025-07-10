@@ -46,6 +46,7 @@ def get_engine_stage():
 @task
 def scan_files():
     allowed_ext = ['.csv', '.xlsx', '.xls', '.xlsb']
+<<<<<<< HEAD
     ashan_files = []
     
     for root, dirs, files in os.walk(DATA_DIR):
@@ -56,6 +57,15 @@ def scan_files():
     
     logger.info(f"Ашан файлы для обработки: {ashan_files}")
     return ashan_files
+=======
+    filtered = [
+        f for f in files
+        if os.path.basename(f).lower().startswith("aushan")
+        and os.path.splitext(f)[1].lower() in allowed_ext
+    ]
+    logger.info(f"Ашан-файлы для обработки: {filtered}")
+    return filtered
+>>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
 
 @task
 def process_file(file_path: str):

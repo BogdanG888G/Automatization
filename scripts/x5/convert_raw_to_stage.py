@@ -15,7 +15,10 @@ NUMERIC_COLUMNS = [
     'sale_month'
 ]
 
+<<<<<<< HEAD
 # Упрощённая мапа уже после нормализации (скобки, пробелы и т.д. удалены)
+=======
+>>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
 COLUMN_RENAME_MAPPING = {
     'Сеть': 'retailer',
     'Филиал': 'branch',
@@ -23,17 +26,24 @@ COLUMN_RENAME_MAPPING = {
     'Город': 'city',
     'Адрес': 'address',
     'Завод': 'factory',
+<<<<<<< HEAD
     'Завод1': 'factory',
+=======
+>>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
     'Завод2': 'factory2',
     'Тов.иер.ур.2': 'prod_level_2',
     'Тов.иер.ур.3': 'prod_level_3',
     'Тов.иер.ур.4': 'prod_level_4',
     'Материал': 'material',
+<<<<<<< HEAD
     'Материал1': 'material',
+=======
+>>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
     'Материал2': 'material2',
     'Бренд': 'brand',
     'Вендор': 'vendor',
     'Основной поставщик': 'main_supplier',
+<<<<<<< HEAD
     'Поставщик склада РЦ': 'warehouse_supplier',
     'Поставщик склада': 'warehouse_supplier',
     'Количество': 'quantity',
@@ -65,6 +75,16 @@ def clean_column_names(columns):
         seen.add(c)
     return cleaned
 
+=======
+    'Поставщик склада (РЦ)': 'warehouse_supplier',
+    'Количество (без ед. изм.)': 'quantity',
+    'Оборот с НДС (без ед.изм.)': 'gross_turnover',
+    'Общая себестоимость (с НДС) (без ед. изм.)': 'gross_cost',
+    'Средняя цена по себестоимости (с НДС)': 'avg_cost_price',
+    'Средняя цена продажи (с НДС)': 'avg_sell_price',
+}
+
+>>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
 
 def convert_raw_to_stage(table_name: str, raw_engine, stage_engine, stage_schema='x5'):
     try:
