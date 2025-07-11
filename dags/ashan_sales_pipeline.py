@@ -47,6 +47,9 @@ def get_engine_stage():
 def scan_files():
     allowed_ext = ['.csv', '.xlsx', '.xls', '.xlsb']
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
     ashan_files = []
     
     for root, dirs, files in os.walk(DATA_DIR):
@@ -57,6 +60,7 @@ def scan_files():
     
     logger.info(f"Ашан файлы для обработки: {ashan_files}")
     return ashan_files
+<<<<<<< HEAD
 =======
     filtered = [
         f for f in files
@@ -66,6 +70,8 @@ def scan_files():
     logger.info(f"Ашан-файлы для обработки: {filtered}")
     return filtered
 >>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
+=======
+>>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
 
 @task
 def process_file(file_path: str):
