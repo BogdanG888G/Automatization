@@ -4,7 +4,6 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# Итоговые названия после clean_column_names и переименования
 NUMERIC_COLUMNS = [
     'quantity',
     'gross_turnover',
@@ -15,14 +14,6 @@ NUMERIC_COLUMNS = [
     'sale_month'
 ]
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-# Упрощённая мапа уже после нормализации (скобки, пробелы и т.д. удалены)
-=======
->>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
-=======
-# Упрощённая мапа уже после нормализации (скобки, пробелы и т.д. удалены)
->>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
 COLUMN_RENAME_MAPPING = {
     'Сеть': 'retailer',
     'Филиал': 'branch',
@@ -30,35 +21,17 @@ COLUMN_RENAME_MAPPING = {
     'Город': 'city',
     'Адрес': 'address',
     'Завод': 'factory',
-<<<<<<< HEAD
-<<<<<<< HEAD
     'Завод1': 'factory',
-=======
->>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
-=======
-    'Завод1': 'factory',
->>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
     'Завод2': 'factory2',
     'Тов.иер.ур.2': 'prod_level_2',
     'Тов.иер.ур.3': 'prod_level_3',
     'Тов.иер.ур.4': 'prod_level_4',
     'Материал': 'material',
-<<<<<<< HEAD
-<<<<<<< HEAD
     'Материал1': 'material',
-=======
->>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
-=======
-    'Материал1': 'material',
->>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
     'Материал2': 'material2',
     'Бренд': 'brand',
     'Вендор': 'vendor',
     'Основной поставщик': 'main_supplier',
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
     'Поставщик склада РЦ': 'warehouse_supplier',
     'Поставщик склада': 'warehouse_supplier',
     'Количество': 'quantity',
@@ -71,27 +44,6 @@ COLUMN_RENAME_MAPPING = {
     'Средняя цена по себестоимости с НДС': 'avg_cost_price',
     'Средняя цена продажи': 'avg_sell_price',
     'Средняя цена продажи с НДС': 'avg_sell_price',
-<<<<<<< HEAD
-}
-
-def clean_column_names(columns):
-    """
-    Удаляет переносы строк, скобки, двойные пробелы и дублирующиеся колонки.
-    """
-    cleaned = []
-    seen = set()
-    for col in columns:
-        c = col.replace('\n', ' ').replace('\r', ' ').strip()
-        c = re.sub(r'\s+', ' ', c)  # двойные пробелы → один
-        c = re.sub(r'\s*\(.*?\)', '', c)  # удалить всё в скобках
-        if c in seen:
-            count = sum(1 for x in cleaned if x.startswith(c))
-            c = f"{c}{count+1}"
-        cleaned.append(c)
-        seen.add(c)
-    return cleaned
-
-=======
     'Поставщик склада (РЦ)': 'warehouse_supplier',
     'Количество (без ед. изм.)': 'quantity',
     'Оборот с НДС (без ед.изм.)': 'gross_turnover',
@@ -100,10 +52,6 @@ def clean_column_names(columns):
     'Средняя цена продажи (с НДС)': 'avg_sell_price',
 }
 
->>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
-=======
-}
-
 def clean_column_names(columns):
     """
     Удаляет переносы строк, скобки, двойные пробелы и дублирующиеся колонки.
@@ -120,8 +68,6 @@ def clean_column_names(columns):
         cleaned.append(c)
         seen.add(c)
     return cleaned
-
->>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
 
 def convert_raw_to_stage(table_name: str, raw_engine, stage_engine, stage_schema='x5'):
     try:

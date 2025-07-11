@@ -46,32 +46,16 @@ def get_engine_stage():
 @task
 def scan_files():
     allowed_ext = ['.csv', '.xlsx', '.xls', '.xlsb']
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
     ashan_files = []
-    
+
     for root, dirs, files in os.walk(DATA_DIR):
         for f in files:
             if f.lower().startswith("aushan_") and os.path.splitext(f)[1].lower() in allowed_ext:
                 full_path = os.path.join(root, f)
                 ashan_files.append(full_path)
-    
+
     logger.info(f"Ашан файлы для обработки: {ashan_files}")
     return ashan_files
-<<<<<<< HEAD
-=======
-    filtered = [
-        f for f in files
-        if os.path.basename(f).lower().startswith("aushan")
-        and os.path.splitext(f)[1].lower() in allowed_ext
-    ]
-    logger.info(f"Ашан-файлы для обработки: {filtered}")
-    return filtered
->>>>>>> 66c7e5c (Дополнил данные и пометил дальнейший план)
-=======
->>>>>>> 8188243 (Приведение столбцов к общему виду для X5, правки к ДАГу Ашана)
 
 @task
 def process_file(file_path: str):
