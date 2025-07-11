@@ -1,6 +1,5 @@
 import pandas as pd
-from sqlalchemy import text, event
-from sqlalchemy.engine import Engine
+from sqlalchemy import text
 import os
 import re
 import logging
@@ -18,27 +17,57 @@ MONTHS = {
     'сентябрь': 9, 'октябрь': 10, 'ноябрь': 11, 'декабрь': 12,
 }
 
+# Стандартизация нестандартных названий колонок для X5
+X5_COLUMN_RENAME_MAP = {
+    'Завод.1': 'factory2',
+    'Материал.1': 'material2'
+}
+
 def extract_year_month_from_filename(file_name):
-    """
-    Извлекает год и месяц из названия файла, например: x5_january_2025.csv
-    Возвращает (месяц, год) или (None, None), если не найдено.
-    """
     name = os.path.splitext(os.path.basename(file_name))[0].lower()
     tokens = re.split(r'[\W_]+', name)
-    
+
     year = next((int(t) for t in tokens if t.isdigit() and len(t) == 4), None)
     month = next((MONTHS[t] for t in tokens if t in MONTHS), None)
-    
-    if year and month:
-        return month, year
-    return None, None   
+
+    return (month, year) if month and year else (None, None)
+
+def clean_column_names(columns):
+    cleaned = []
+    seen = set()
+    for col in columns:
+        col = col.replace('\n', ' ').replace('\r', ' ').strip()
+        col = re.sub(r'\s+', ' ', col)
+        col = re.sub(r'\s*\(.*?\)', '', col)
+        col = col[:100]
+        base_col = col
+        count = 1
+        while col in seen:
+            col = f"{base_col}_{count}"
+            count += 1
+        cleaned.append(col)
+        seen.add(col)
+    return cleaned
 
 def create_table_and_upload(file_path, engine):
     try:
         file_name = os.path.basename(file_path)
+        logger.info(f"[START] Обработка файла: {file_name}")
+
         df = pd.read_csv(file_path, dtype=str, sep=';', quotechar='"', skiprows=1)
-        df = df.head(10000)
-        df = df.fillna('').astype(str)
+        df = df.head(10000).fillna('').astype(str)
+
+        if df.empty or not df.columns.tolist():
+            raise ValueError(f"Файл {file_name} не содержит данных или колонок")
+
+        df.columns = clean_column_names(df.columns)
+
+        # Стандартизация названий колонок для X5
+        if 'x5' in file_name.lower():
+            rename_map = {col: X5_COLUMN_RENAME_MAP[col] for col in df.columns if col in X5_COLUMN_RENAME_MAP}
+            if rename_map:
+                logger.info(f"[INFO] Переименование колонок для X5: {rename_map}")
+                df.rename(columns=rename_map, inplace=True)
 
         # Добавление даты из имени файла
         month, year = extract_year_month_from_filename(file_name)
@@ -51,7 +80,9 @@ def create_table_and_upload(file_path, engine):
 
         logger.info(f">>> Заголовки колонок: {df.columns.tolist()}")
 
+        # Формирование имени таблицы
         table_name = re.sub(r'\W+', '_', os.path.splitext(file_name)[0].lower())
+        table_name = table_name[:128]
 
         with engine.connect() as conn:
             result = conn.execute(
@@ -80,17 +111,12 @@ def create_table_and_upload(file_path, engine):
 
         logger.info(f"[INFO] Подготовка к загрузке {len(df)} строк в таблицу raw.{table_name}")
 
-        # Настройка fast_executemany
+        # Загрузка в БД
         raw_conn = engine.raw_connection()
         cursor = raw_conn.cursor()
         cursor.fast_executemany = True
 
         start_time = time.time()
-
-        @event.listens_for(Engine, "before_cursor_execute")
-        def enable_fast_executemany(conn, cursor, statement, parameters, context, executemany):
-            if executemany:
-                cursor.fast_executemany = True
 
         df.to_sql(
             name=table_name,

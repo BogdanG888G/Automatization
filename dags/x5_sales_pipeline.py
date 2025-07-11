@@ -45,13 +45,16 @@ def get_engine_stage():
 
 @task
 def scan_files():
-    files = get_files_from_directory(DATA_DIR)
     allowed_ext = ['.csv', '.xlsx', '.xls', '.xlsb']
-    x5_files = [
-        f for f in files
-        if os.path.basename(f).lower().startswith("x5_")
-        and os.path.splitext(f)[1].lower() in allowed_ext
-    ]
+    x5_files = []
+    
+    # Проходим рекурсивно по DATA_DIR
+    for root, dirs, files in os.walk(DATA_DIR):
+        for f in files:
+            if f.lower().startswith("x5_") and os.path.splitext(f)[1].lower() in allowed_ext:
+                full_path = os.path.join(root, f)
+                x5_files.append(full_path)
+    
     logger.info(f"Файлы X5 для обработки: {x5_files}")
     return x5_files
 
