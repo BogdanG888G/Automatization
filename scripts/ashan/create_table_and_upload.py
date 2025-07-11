@@ -1,114 +1,175 @@
-import pandas as pd
-from sqlalchemy import text, event
-from sqlalchemy.engine import Engine
 import os
 import re
 import logging
 import time
+from datetime import datetime
+from contextlib import closing
+import pandas as pd
+import numpy as np
+from sqlalchemy import text, event, Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
-# Словарь месяцев
-MONTHS = {
-    'january': 1, 'february': 2, 'march': 3, 'april': 4,
-    'may': 5, 'june': 6, 'july': 7, 'august': 8,
-    'september': 9, 'october': 10, 'november': 11, 'december': 12,
-    'январь': 1, 'февраль': 2, 'март': 3, 'апрель': 4,
-    'май': 5, 'июнь': 6, 'июль': 7, 'август': 8,
-    'сентябрь': 9, 'октябрь': 10, 'ноябрь': 11, 'декабрь': 12,
-}
-
-def extract_year_month_from_filename(file_name):
-    """
-    Извлекает месяц и год из имени файла.
-    Пример: x5_january_2025.csv → (1, 2025)
-    """
-    name = os.path.splitext(os.path.basename(file_name))[0].lower()
-    tokens = re.split(r'[\W_]+', name)
+class TableProcessor:
+    """Класс для обработки и загрузки таблиц с оптимизацией памяти и производительности."""
     
-    year = next((int(t) for t in tokens if t.isdigit() and len(t) == 4), None)
-    month = next((MONTHS[t] for t in tokens if t in MONTHS), None)
+    # Оптимизированные константы
+    CHUNKSIZE = 100000  # Размер чанка для обработки
+    BATCH_SIZE = 50000  # Размер батча для вставки в БД
     
-    return month, year
+    # Словарь месяцев с оптимизированным доступом
+    MONTHS = {
+        **{m.lower(): i+1 for i, m in enumerate([
+            'january', 'february', 'march', 'april', 'may', 'june',
+            'july', 'august', 'september', 'october', 'november', 'december'
+        ])},
+        **{m.lower(): i+1 for i, m in enumerate([
+            'январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
+            'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'
+        ])}
+    }
 
-def create_table_and_upload(file_path, engine):
-    try:
-        file_name = os.path.basename(file_path).lower()
+    @staticmethod
+    def extract_metadata(filename: str) -> tuple:
+        """Оптимизированное извлечение метаданных из имени файла."""
+        name = os.path.splitext(os.path.basename(filename))[0].lower()
+        tokens = re.findall(r'[a-zа-я]+|\d{4}', name)
+        
+        year = next((int(t) for t in tokens if t.isdigit() and len(t) == 4), None)
+        month = next((TableProcessor.MONTHS.get(t) for t in tokens if t in TableProcessor.MONTHS), None)
+        
+        return month, year
 
-        # Читаем CSV — Ашан использует ; и кавычки
-        df = pd.read_csv(file_path, dtype=str, sep=';', quotechar='"')
-        df = df.head(10000)
-        df = df.fillna('').astype(str)
+    @staticmethod
+    def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Оптимизированная нормализация названий столбцов."""
+        df.columns = [re.sub(r'\s+', '_', col.strip().lower()) for col in df.columns]
+        return df
 
-        # Определяем месяц и год
-        month, year = extract_year_month_from_filename(file_name)
-        if month and year:
-            df['sale_year'] = year
-            df['sale_month'] = month
-            logger.info(f"[INFO] Установлены sale_year = {year}, sale_month = {month} из имени файла {file_name}")
-        else:
-            logger.warning(f"[WARN] Не удалось определить месяц и год из имени файла {file_name}")
+    @staticmethod
+    def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        """Оптимизация типов данных в DataFrame."""
+        # Конвертация строковых колонок
+        str_cols = df.select_dtypes(include=['object']).columns
+        for col in str_cols:
+            df[col] = df[col].astype('string')
+        
+        # Оптимизация числовых колонок
+        num_cols = df.select_dtypes(include=['float']).columns
+        for col in num_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        
+        return df
 
-        logger.info(f"[INFO] Колонки в файле: {df.columns.tolist()}")
-
-        name = os.path.splitext(file_name)[0]
-        table_name = re.sub(r'\W+', '_', name)
-
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("""
-                    SELECT 1 
-                    FROM information_schema.tables 
-                    WHERE table_schema = 'raw' AND table_name = :table
-                """),
-                {"table": table_name}
-            ).first()
-
-            if not result:
-                columns_sql = ', '.join([f'[{col}] NVARCHAR(MAX)' for col in df.columns])
-                create_sql = f"CREATE TABLE raw.{table_name} ({columns_sql})"
-                logger.info(f"[INFO] Создаём таблицу raw.{table_name}")
-                with conn.begin():
-                    conn.execute(text(create_sql))
-                logger.info(f"[SUCCESS] Таблица raw.{table_name} создана")
+    @classmethod
+    def process_file(cls, file_path: str, engine) -> str:
+        """Основной метод обработки файла с оптимизацией памяти."""
+        try:
+            start_time = time.time()
+            file_name = os.path.basename(file_path)
+            base_name = os.path.splitext(file_name)[0]
+            table_name = re.sub(r'\W+', '_', base_name)
+            
+            # 1. Определение типа файла и чтение
+            if file_path.endswith('.xlsx'):
+                reader = pd.read_excel(file_path, sheet_name=None, dtype='string', engine='openpyxl')
             else:
-                logger.info(f"[INFO] Таблица raw.{table_name} уже существует")
+                reader = {'data': pd.read_csv(file_path, dtype='string', sep=';', quotechar='"')}
+            
+            # 2. Параллельная обработка листов
+            processed_chunks = []
+            for sheet_name, df in reader.items():
+                try:
+                    # Быстрая проверка на пустоту
+                    if df.empty:
+                        continue
+                        
+                    df = cls.normalize_columns(df)
+                    
+                    # Извлечение метаданных
+                    month, year = cls.extract_metadata(file_name)
+                    if not month and 'month' in df.columns:
+                        month, year = cls.extract_metadata(df['month'].iloc[0])
+                    
+                    # Добавление метаданных
+                    if month and year:
+                        df['sale_year'] = str(year)
+                        df['sale_month'] = str(month)
+                    
+                    processed_chunks.append(cls.optimize_dataframe(df))
+                except Exception as e:
+                    logger.error(f"Ошибка обработки листа {sheet_name}: {str(e)}")
+                    continue
+            
+            if not processed_chunks:
+                raise ValueError("Все листы пусты или содержат ошибки")
+            
+            # 3. Объединение с оптимизацией памяти
+            final_df = pd.concat(processed_chunks, ignore_index=True)
+            del processed_chunks
+            
+            # 4. Создание таблицы в БД
+            with engine.connect() as conn:
+                # Проверка существования таблицы
+                table_exists = conn.execute(
+                    text("""
+                        SELECT 1 FROM information_schema.tables 
+                        WHERE table_schema = 'raw' AND table_name = :table
+                    """),
+                    {"table": table_name}
+                ).scalar()
+                
+                if not table_exists:
+                    # Оптимизированное создание таблицы
+                    columns_sql = []
+                    for col, dtype in zip(final_df.columns, final_df.dtypes):
+                        sql_type = 'NVARCHAR(255)' if dtype == 'object' else 'FLOAT'
+                        columns_sql.append(f'[{col}] {sql_type}')
+                    
+                    create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(columns_sql)})"
+                    conn.execute(text(create_sql))
+                    conn.commit()
+            
+            # 5. Оптимизированная загрузка данных
+            cls.bulk_insert(final_df, table_name, engine)
+            
+            logger.info(f"Файл {file_name} обработан за {time.time()-start_time:.2f} сек. "
+                       f"Загружено {len(final_df)} строк в raw.{table_name}")
+            
+            return table_name
+            
+        except Exception as e:
+            logger.error(f"Критическая ошибка при обработке файла {file_path}: {str(e)}", exc_info=True)
+            raise
 
-            row_count = conn.execute(text(f"SELECT COUNT(*) FROM raw.{table_name}")).scalar()
-            if row_count > 0:
-                logger.warning(f"[SKIP] Таблица raw.{table_name} уже содержит данные ({row_count} строк). Загрузка пропущена.")
-                return table_name
-
-        # Настройка fast_executemany
-        raw_conn = engine.raw_connection()
-        cursor = raw_conn.cursor()
-        cursor.fast_executemany = True
-
-        @event.listens_for(Engine, "before_cursor_execute")
-        def _enable_fast_executemany(conn, cursor, statement, parameters, context, executemany):
+    @classmethod
+    def bulk_insert(cls, df: pd.DataFrame, table_name: str, engine):
+        """Оптимизированная массовая вставка данных."""
+        @event.listens_for(engine, 'before_cursor_execute')
+        def set_fast_executemany(conn, cursor, stmt, params, context, executemany):
             if executemany:
                 cursor.fast_executemany = True
+        
+        try:
+            with closing(engine.raw_connection()) as conn:
+                with conn.cursor() as cursor:
+                    # Подготовка данных для вставки
+                    data = [tuple(x) for x in df.itertuples(index=False, name=None)]
+                    cols = ', '.join([f'[{col}]' for col in df.columns])
+                    params = ', '.join(['?'] * len(df.columns))
+                    
+                    # Чанкованная вставка
+                    for i in range(0, len(data), cls.BATCH_SIZE):
+                        batch = data[i:i + cls.BATCH_SIZE]
+                        insert_sql = f"INSERT INTO raw.{table_name} ({cols}) VALUES ({params})"
+                        cursor.executemany(insert_sql, batch)
+                        conn.commit()
+                        
+        except SQLAlchemyError as e:
+            logger.error(f"Ошибка при вставке данных в raw.{table_name}: {str(e)}")
+            raise
 
-        logger.info(f"[INFO] Начинаем загрузку {len(df)} строк в raw.{table_name}")
-        start = time.time()
-
-        df.to_sql(
-            name=table_name,
-            schema='raw',
-            con=engine,
-            if_exists='append',
-            index=False,
-            chunksize=1000
-        )
-
-        duration = time.time() - start
-        logger.info(f"[SUCCESS] Загружено {len(df)} строк в raw.{table_name} за {duration:.2f} сек.")
-
-        cursor.close()
-        raw_conn.close()
-
-        return table_name
-
-    except Exception as e:
-        logger.error(f"[ERROR] Ошибка при загрузке файла {file_path}: {e}", exc_info=True)
-        raise
+def create_table_and_upload(file_path: str, engine):
+    """Точка входа для обработки файла."""
+    return TableProcessor.process_file(file_path, engine)
