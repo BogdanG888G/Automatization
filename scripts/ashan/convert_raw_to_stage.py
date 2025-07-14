@@ -188,55 +188,55 @@ def _create_stage_table(conn: engine.Connection, table_name: str,
 
 def _bulk_insert_data(conn: engine.Connection, table_name: str, 
                      df: pd.DataFrame, schema: str = 'ashan') -> None:
-    """Fast data loading using bulk insert."""
+    """Insert data only if table is empty, no truncate."""
     if df.empty:
         logger.warning("Empty DataFrame, skipping insert")
         return
-    
-    # Generate safe column names
+
     safe_columns = [_sanitize_column_name(col) for col in df.columns if col]
     if not safe_columns:
         raise ValueError("No valid columns for insertion")
-    
-    # Prepare data - ensure proper types
+
+    # Проверяем, есть ли уже данные в таблице
+    row_count_result = conn.execute(
+        text(f"SELECT COUNT(*) FROM [{schema}].[{table_name}]")
+    )
+    row_count = row_count_result.scalar()
+    if row_count > 0:
+        logger.info(f"Table [{schema}].[{table_name}] already contains data ({row_count} rows), skipping insert")
+        return
+
+    # Подготавливаем данные для вставки
     data = []
     for row in df.itertuples(index=False):
         processed_row = []
         for val, col in zip(row, df.columns):
             if col in ColumnConfig.NUMERIC_COLS:
-                # Ensure numeric values are properly formatted
                 processed_val = float(val) if pd.notna(val) else 0.0
             else:
-                # Convert to string and handle NULLs
                 processed_val = str(val) if pd.notna(val) else ''
             processed_row.append(processed_val)
         data.append(tuple(processed_row))
-    
+
     cols = ', '.join([f'[{col}]' for col in safe_columns])
     params = ', '.join(['?'] * len(safe_columns))
-    
-    # Get raw connection for fast_executemany
+
     raw_conn = conn.connection
     cursor = raw_conn.cursor()
-    
+
     try:
         cursor.fast_executemany = True
-        
-        # Clear table
-        cursor.execute(f"TRUNCATE TABLE [{schema}].[{table_name}]")
-        
-        # Insert data
         insert_sql = f"INSERT INTO [{schema}].[{table_name}] ({cols}) VALUES ({params})"
         cursor.executemany(insert_sql, data)
-        
-        # Commit changes
         raw_conn.commit()
+        logger.info(f"Inserted {len(df)} rows into [{schema}].[{table_name}]")
     except Exception as e:
         raw_conn.rollback()
         logger.error(f"Error inserting data: {e}\nSQL: {insert_sql}")
         raise
     finally:
         cursor.close()
+
 
 def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine, 
                         stage_engine: engine.Engine, stage_schema: str = 'ashan', 

@@ -7,10 +7,12 @@ import os
 import shutil
 import logging
 from sqlalchemy import create_engine, exc
-from typing import List
+import pandas as pd
+from typing import List, Optional
 from airflow.utils.task_group import TaskGroup
+import chardet
 
-# Твои строки подключения:
+# Database connection strings
 DEFAULT_CONN_TEST = (
     "mssql+pyodbc://airflow_agent:123@host.docker.internal/Test"
     "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
@@ -20,11 +22,11 @@ DEFAULT_CONN_STAGE = (
     "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
 )
 
-# Конфигурация
 class Config:
-    MAX_CONCURRENT_TASKS = 4
+    MAX_CONCURRENT_TASKS = 8
     MAX_FILES_PER_RUN = 20
     TASK_TIMEOUT = timedelta(minutes=30)
+    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
     DATA_DIR = "/opt/airflow/data"
     ARCHIVE_DIR = "/opt/airflow/archive"
@@ -32,7 +34,6 @@ class Config:
     FILE_PREFIX = "aushan_"
     STAGE_SCHEMA = "ashan"
 
-    # Пул
     @staticmethod
     def get_processing_pool():
         try:
@@ -59,7 +60,7 @@ _engine_cache = {}
 _last_cache_update = datetime.min
 
 def get_engine(db_type: str):
-    """Получаем движок с кешированием и строкой подключения из констант"""
+    """Get SQLAlchemy engine with caching"""
     global _last_cache_update
 
     if (datetime.now() - _last_cache_update) > timedelta(hours=6):
@@ -73,15 +74,82 @@ def get_engine(db_type: str):
             elif db_type.lower() == "stage":
                 conn_str = DEFAULT_CONN_STAGE
             else:
-                raise ValueError(f"Неизвестный тип БД для подключения: {db_type}")
+                raise ValueError(f"Unknown DB type: {db_type}")
 
             _engine_cache[db_type] = create_engine(conn_str, **Config.CONN_SETTINGS)
         except Exception as e:
-            logging.error(f"Ошибка создания engine для {db_type}: {str(e)}")
+            logging.error(f"Error creating engine for {db_type}: {str(e)}")
             raise
 
     return _engine_cache[db_type]
 
+def detect_file_encoding(file_path: str) -> str:
+    """Detect file encoding using chardet"""
+    with open(file_path, 'rb') as f:
+        raw_data = f.read(10000)  # Read first 10KB to detect encoding
+        result = chardet.detect(raw_data)
+        return result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
+
+def preprocess_large_csv(file_path: str) -> str:
+    """Pre-process large CSV files that might have parsing issues"""
+    temp_path = file_path + ".processed"
+    encoding = detect_file_encoding(file_path)
+    
+    try:
+        with open(file_path, 'r', encoding=encoding) as infile, \
+             open(temp_path, 'w', encoding='utf-8') as outfile:
+            
+            for i, line in enumerate(infile):
+                # Basic cleaning
+                line = line.replace('\x00', '').strip()
+                if not line:
+                    continue
+                    
+                # Ensure proper line structure
+                if line.count(';') >= 5:  # Minimum expected columns
+                    outfile.write(line + '\n')
+                elif i == 0:  # Header row
+                    outfile.write(line + '\n')
+                
+        return temp_path
+    except Exception as e:
+        logging.error(f"File preprocessing error: {str(e)}")
+        return file_path  # fallback to original
+
+def read_csv_with_fallback(file_path: str) -> Optional[pd.DataFrame]:
+    """Read CSV with multiple fallback strategies"""
+    encoding = detect_file_encoding(file_path)
+    
+    # First try standard read
+    try:
+        return pd.read_csv(file_path, delimiter=';', decimal=',', thousands=' ', encoding=encoding)
+    except Exception as e:
+        logging.warning(f"Standard read failed, trying fallbacks: {str(e)}")
+    
+    # Try different strategies
+    strategies = [
+        {'engine': 'python', 'encoding': encoding},
+        {'error_bad_lines': False, 'warn_bad_lines': True},
+        {'encoding': 'cp1251'},
+        {'encoding': 'latin1'},
+        {'sep': ';', 'decimal': ',', 'thousands': ' ', 'engine': 'python'}
+    ]
+    
+    for strategy in strategies:
+        try:
+            return pd.read_csv(file_path, **strategy)
+        except:
+            continue
+    
+    # Final attempt with preprocessing
+    processed_path = preprocess_large_csv(file_path)
+    try:
+        return pd.read_csv(processed_path, delimiter=';', decimal=',', thousands=' ')
+    finally:
+        if processed_path != file_path and os.path.exists(processed_path):
+            os.remove(processed_path)
+    
+    return None
 
 @task(
     task_id="scan_files",
@@ -92,10 +160,10 @@ def get_engine(db_type: str):
     pool_slots=1
 )
 def scan_files() -> List[str]:
+    """Scan for files matching criteria"""
     try:
         valid_files = []
         total_size = 0
-        max_size = 2 * 1024 * 1024 * 1024  # 2GB
 
         for root, _, files in os.walk(Config.DATA_DIR):
             for f in files:
@@ -105,8 +173,8 @@ def scan_files() -> List[str]:
                     file_path = os.path.join(root, f)
                     file_size = os.path.getsize(file_path)
 
-                    if total_size + file_size > max_size:
-                        logging.warning(f"Превышен лимит размера файлов (2GB). Пропускаем {file_path}")
+                    if total_size + file_size > Config.MAX_FILE_SIZE:
+                        logging.warning(f"File size limit exceeded. Skipping {file_path}")
                         continue
 
                     valid_files.append(file_path)
@@ -118,13 +186,12 @@ def scan_files() -> List[str]:
             if len(valid_files) >= Config.MAX_FILES_PER_RUN:
                 break
 
-        logging.info(f"Найдено {len(valid_files)} файлов (общий размер: {total_size / 1024 / 1024:.2f} MB)")
+        logging.info(f"Found {len(valid_files)} files (total size: {total_size / 1024 / 1024:.2f} MB)")
         return valid_files[:Config.MAX_FILES_PER_RUN]
 
     except Exception as e:
-        logging.error(f"Ошибка сканирования файлов: {str(e)}", exc_info=True)
+        logging.error(f"File scanning error: {str(e)}", exc_info=True)
         raise
-
 
 @task(
     task_id="process_file",
@@ -135,23 +202,36 @@ def scan_files() -> List[str]:
     pool_slots=1
 )
 def process_file(file_path: str):
+    """Process a single file"""
     try:
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Файл не найден: {file_path}")
+            raise FileNotFoundError(f"File not found: {file_path}")
 
-        if file_path.lower().endswith(('.xlsx', '.xls', '.xlsb')):
+        # Special handling for May 2024 files
+        if "may_2024" in file_path.lower():
+            df = process_problematic_may_2024(file_path)
+            if df.empty:
+                raise ValueError("Failed to process May 2024 file")
+        elif file_path.lower().endswith(('.xlsx', '.xls', '.xlsb')):
             from common.convert_xlsx_to_csv import convert_excel_to_csv
             file_path = convert_excel_to_csv(file_path)
-            logging.info(f"Конвертирован в CSV: {file_path}")
+            logging.info(f"Converted to CSV: {file_path}")
+            df = read_csv_with_fallback(file_path)
+        else:
+            df = read_csv_with_fallback(file_path)
 
+        if df is None or df.empty:
+            raise ValueError("Failed to read file data")
+
+        # Database operations
         engine_test = get_engine('test')
         try:
             from ashan.create_table_and_upload import create_table_and_upload
             table_name = create_table_and_upload(file_path, engine=engine_test)
-            logging.info(f"Данные загружены в raw.{table_name}")
+            logging.info(f"Data loaded to raw.{table_name}")
         except exc.SQLAlchemyError as e:
             engine_test.dispose()
-            raise RuntimeError(f"Ошибка загрузки в raw: {str(e)}")
+            raise RuntimeError(f"Raw load error: {str(e)}")
 
         engine_stage = get_engine('stage')
         try:
@@ -161,25 +241,25 @@ def process_file(file_path: str):
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
                 stage_schema=Config.STAGE_SCHEMA,
-                limit=10000  # Добавлен параметр limit с значением 10 000
+                limit=10000
             )
-            logging.info(f"Данные загружены в stage")
+            logging.info("Data loaded to stage")
         except exc.SQLAlchemyError as e:
             engine_stage.dispose()
-            raise RuntimeError(f"Ошибка загрузки в stage: {str(e)}")
+            raise RuntimeError(f"Stage load error: {str(e)}")
         finally:
             engine_test.dispose()
             engine_stage.dispose()
 
+        # Archive file
         os.makedirs(Config.ARCHIVE_DIR, exist_ok=True)
         archive_path = os.path.join(Config.ARCHIVE_DIR, os.path.basename(file_path))
         shutil.move(file_path, archive_path)
-        logging.info(f"Файл перемещен в архив: {archive_path}")
+        logging.info(f"File archived: {archive_path}")
 
     except Exception as e:
-        logging.error(f"Ошибка обработки файла {file_path}: {str(e)}", exc_info=True)
+        logging.error(f"File processing error: {file_path} - {str(e)}", exc_info=True)
         raise
-
 
 default_args = {
     'owner': 'airflow',
