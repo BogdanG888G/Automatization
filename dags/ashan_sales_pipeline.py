@@ -207,15 +207,12 @@ def process_file(file_path: str):
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Special handling for May 2024 files
-        if "may_2024" in file_path.lower():
-            df = process_problematic_may_2024(file_path)
-            if df.empty:
-                raise ValueError("Failed to process May 2024 file")
         elif file_path.lower().endswith(('.xlsx', '.xls', '.xlsb')):
             from common.convert_xlsx_to_csv import convert_excel_to_csv
-            file_path = convert_excel_to_csv(file_path)
-            logging.info(f"Converted to CSV: {file_path}")
+            csv_paths = convert_excel_to_csv(file_path, max_rows=100000)
+            logging.info(f"Converted Excel to CSV files: {csv_paths}")
+            # Если несколько csv, можно брать первый (или расширить логику)
+            file_path = csv_paths[0]
             df = read_csv_with_fallback(file_path)
         else:
             df = read_csv_with_fallback(file_path)

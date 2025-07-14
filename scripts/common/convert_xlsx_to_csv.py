@@ -21,7 +21,7 @@ class ExcelToCSVConverter:
         return col.strip().translate(remove_chars)
 
     @classmethod
-    def convert_to_csv(cls, file_path: str) -> List[str]:
+    def convert_to_csv(cls, file_path: str, max_rows: Optional[int] = None) -> List[str]:
         """Конвертация всех листов Excel-файла в отдельные CSV-файлы."""
         try:
             ext = os.path.splitext(file_path)[1].lower()
@@ -35,9 +35,9 @@ class ExcelToCSVConverter:
             for sheet in sheet_names:
                 logger.info(f"Обработка листа '{sheet}' из файла {file_path}")
                 if os.path.getsize(file_path) > 50 * 1024 * 1024:  # >50MB
-                    path = cls._process_large_file(file_path, ext, sheet)
+                    path = cls._process_large_file(file_path, ext, sheet, max_rows)
                 else:
-                    path = cls._process_normal_file(file_path, ext, sheet)
+                    path = cls._process_normal_file(file_path, ext, sheet, max_rows)
                 result_paths.append(path)
 
             os.remove(file_path)
@@ -55,10 +55,10 @@ class ExcelToCSVConverter:
         return f"{base_path}__{sheet_suffix}.csv"
 
     @classmethod
-    def _process_normal_file(cls, file_path: str, ext: str, sheet_name: str) -> str:
+    def _process_normal_file(cls, file_path: str, ext: str, sheet_name: str, max_rows: Optional[int] = None) -> str:
         """Обработка листа обычного Excel-файла."""
         engine = 'pyxlsb' if ext == '.xlsb' else 'openpyxl'
-        df = pd.read_excel(file_path, engine=engine, dtype=str, sheet_name=sheet_name)
+        df = pd.read_excel(file_path, engine=engine, dtype=str, sheet_name=sheet_name, nrows=max_rows)
 
         df.columns = [cls.clean_column_name(col) for col in df.columns]
 
@@ -74,7 +74,7 @@ class ExcelToCSVConverter:
         return new_path
 
     @classmethod
-    def _process_large_file(cls, file_path: str, ext: str, sheet_name: str) -> str:
+    def _process_large_file(cls, file_path: str, ext: str, sheet_name: str, max_rows: Optional[int] = None) -> str:
         """Обработка большого листа Excel-файла по частям."""
         engine = 'pyxlsb' if ext == '.xlsb' else 'openpyxl'
         new_path = cls._generate_csv_path(file_path, ext, sheet_name)
@@ -95,16 +95,25 @@ class ExcelToCSVConverter:
 
         chunk_size = cls.CHUNKSIZE
         skip_rows = 1
+        rows_written = 0
+
         while True:
+            if max_rows is not None and rows_written >= max_rows:
+                break
+
+            rows_left = max_rows - rows_written if max_rows is not None else chunk_size
+            chunk_rows = min(chunk_size, rows_left)
+
             df_chunk = pd.read_excel(
                 file_path,
                 engine=engine,
                 sheet_name=sheet_name,
                 skiprows=skip_rows,
-                nrows=chunk_size,
+                nrows=chunk_rows,
                 dtype=str,
                 header=None
             )
+
             if df_chunk.empty:
                 break
 
@@ -118,11 +127,12 @@ class ExcelToCSVConverter:
                 header=False
             )
 
-            skip_rows += chunk_size
+            skip_rows += chunk_rows
+            rows_written += len(df_chunk)
 
         return new_path
 
 
-def convert_excel_to_csv(file_path: str) -> List[str]:
+def convert_excel_to_csv(file_path: str, max_rows: Optional[int] = None) -> List[str]:
     """Точка входа для конвертации Excel-файлов. Возвращает список путей к CSV-файлам."""
-    return ExcelToCSVConverter.convert_to_csv(file_path)
+    return ExcelToCSVConverter.convert_to_csv(file_path, max_rows=max_rows)
