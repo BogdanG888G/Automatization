@@ -27,7 +27,7 @@
 
 1. **Клонируйте репозиторий:**
    ```bash
-   git clone https://github.com/your-username/airflow-data-pipeline.git
+   git clone https://github.com/BogdanG888G/Automatization.git
    cd airflow-data-pipeline
    ```
 
