@@ -31,8 +31,29 @@ class ColumnConfig:
         'discount_amount_rub': {'dtype': 'float64', 'default': 0.0}
     }
     
-    RENAME_MAP = {
+    RENAME_MAP_2024 = {
         'month': 'sales_month',
+        'формат': 'store_format',
+        'наименование_тт': 'store_name',
+        'код_тт': 'store_code', 
+        'адрес_тт': 'store_address',
+        'уровень_1': 'product_level_1',
+        'уровень_2': 'product_level_2',
+        'уровень_3': 'product_level_3',
+        'уровень_4': 'product_level_4',
+        'поставщик': 'supplier_name',
+        'бренд': 'brand',
+        'наименование_тп': 'product_name',
+        'код_тп': 'product_code',
+        'шк': 'barcode',
+        'оборот_руб': 'turnover_amount_rub',
+        'оборот_шт': 'turnover_quantity',
+        'входящая_цена': 'incoming_price'
+    }
+    
+    RENAME_MAP_2025 = {
+        'month': 'sales_month',
+        'дата': 'sales_date',
         'формат': 'store_format',
         'наименование_тт': 'store_name',
         'код_тт': 'store_code',
@@ -49,7 +70,6 @@ class ColumnConfig:
         'оборот_руб': 'turnover_amount_rub',
         'оборот_шт': 'turnover_quantity',
         'входящая_цена': 'incoming_price',
-        'дата': 'sales_date',
         'код_группы': 'product_group_code',
         'группа': 'product_group_name',
         'код_категории': 'product_category_code',
@@ -72,21 +92,54 @@ class ColumnConfig:
         'промо_продажи_руб': 'promo_sales_amount_rub',
         'остаток_шт': 'stock_quantity',
         'остаток_руб': 'stock_amount_rub',
-        'скидка_руб': 'discount_amount_rub',
-        'код': 'store_code',
-        'адрес': 'store_address',
-        'уровень': 'product_level',
-        'наименование': 'product_name',
-        'none_18': 'unknown_column_18',
-        'none_19': 'unknown_column_19',
-        'none_20': 'unknown_column_20',
-        'none_21': 'unknown_column_21',
-        'none_22': 'unknown_column_22',
-        'none_23': 'unknown_column_23'
+        'скидка_руб': 'discount_amount_rub'
     }
 
-def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert numeric columns with specific format handling for Magnit."""
+def _detect_year(df: pd.DataFrame) -> int:
+    """Detect year based on data format."""
+    if 'month' in df.columns:
+        sample_month = df['month'].iloc[0] if len(df) > 0 else ''
+        if isinstance(sample_month, str) and any(m in sample_month for m in ['Январь', 'Февраль', 'Декабрь']):
+            return 2024
+    return 2025
+
+def _process_2024_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Special processing for 2024 year data format."""
+    logger.info("Applying 2024 year data format processing")
+    
+    # Process month column
+    month_map = {
+        'Январь': '01', 'Февраль': '02', 'Март': '03', 'Апрель': '04',
+        'Май': '05', 'Июнь': '06', 'Июль': '07', 'Август': '08',
+        'Сентябрь': '09', 'Октябрь': '10', 'Ноябрь': '11', 'Декабрь': '12'
+    }
+    
+    df['month'] = df['month'].apply(lambda x: f"2024-{month_map[x]}-01")
+    df['month'] = pd.to_datetime(df['month'])
+    
+    # Process numeric columns with comma as decimal separator
+    numeric_cols = ['оборот_руб', 'оборот_шт', 'входящая_цена']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(',', '.', regex=False)
+                .str.replace(r'[^\d.]', '', regex=True)
+                .replace('', '0')
+                .astype(np.float64)
+                .fillna(0)
+            )
+    
+    return df
+
+def _process_2025_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Processing for 2025 year data format."""
+    logger.info("Applying 2025 year data format processing")
+    return df
+
+def _convert_numeric_columns(df: pd.DataFrame, year: int) -> pd.DataFrame:
+    """Convert numeric columns with specific format handling."""
     logger.info(f"Original columns: {df.columns.tolist()}")
     
     # Normalize column names
@@ -116,16 +169,27 @@ def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     for ru_col, en_col in numeric_cols.items():
         if ru_col in df.columns:
             try:
-                # Magnit often uses comma as decimal separator and spaces as thousand separators
-                df[en_col] = (
-                    df[ru_col]
-                    .astype(str)
-                    .str.replace(',', '.', regex=False)
-                    .str.replace(r'[^\d.]', '', regex=True)
-                    .replace('', '0')
-                    .astype(np.float64)
-                    .fillna(0)
-                )
+                # Handle different decimal separators based on year
+                if year == 2024:
+                    df[en_col] = (
+                        df[ru_col]
+                        .astype(str)
+                        .str.replace(',', '.', regex=False)
+                        .str.replace(r'[^\d.]', '', regex=True)
+                        .replace('', '0')
+                        .astype(np.float64)
+                        .fillna(0)
+                    )
+                else:
+                    df[en_col] = (
+                        df[ru_col]
+                        .astype(str)
+                        .str.replace(',', '.', regex=False)
+                        .str.replace(r'[^\d.]', '', regex=True)
+                        .replace('', '0')
+                        .astype(np.float64)
+                        .fillna(0)
+                    )
                 df.drop(ru_col, axis=1, inplace=True)
             except Exception as e:
                 logger.error(f"Error converting column {ru_col}: {e}")
@@ -134,14 +198,15 @@ def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     logger.info(f"Columns after numeric conversion: {df.columns.tolist()}")
     return df
 
-def _convert_string_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert string columns to English names for Magnit."""
+def _convert_string_columns(df: pd.DataFrame, year: int) -> pd.DataFrame:
+    """Convert string columns to English names."""
     df.columns = [col.lower().replace(' ', '_') for col in df.columns]
     
-    for ru_col, en_col in ColumnConfig.RENAME_MAP.items():
+    rename_map = ColumnConfig.RENAME_MAP_2024 if year == 2024 else ColumnConfig.RENAME_MAP_2025
+    
+    for ru_col, en_col in rename_map.items():
         if ru_col in df.columns:
             try:
-                # Magnit sometimes has mixed encodings, so we handle carefully
                 df[en_col] = (
                     df[ru_col]
                     .astype(str)
@@ -159,13 +224,13 @@ def _convert_string_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _sanitize_column_name(name: str) -> str:
-    """Sanitize column name for SQL Server with Magnit-specific handling."""
+    """Sanitize column name for SQL Server."""
     if not name or not isinstance(name, str):
         return 'unknown_column_0'
     
     original_name = name.lower()
     
-    # Special mappings for Magnit-specific columns
+    # Special mappings for known columns
     special_mappings = {
         'списания_руб': 'writeoff_amount_rub',
         'списания_шт': 'writeoff_quantity',
@@ -197,16 +262,7 @@ def _sanitize_column_name(name: str) -> str:
         'код': 'store_code',
         'адрес': 'store_address',
         'уровень': 'product_level',
-        'наименование': 'product_name',
-        'себестоимсть_в_руб.': 'cost_price_rub',
-        'quantity_sold': 'sales_quantity',
-        'sales_amount': 'sales_amount_rub',
-        'none_18': 'unknown_column_18',
-        'none_19': 'unknown_column_19',
-        'none_20': 'unknown_column_20',
-        'none_21': 'unknown_column_21',
-        'none_22': 'unknown_column_22',
-        'none_23': 'unknown_column_23'
+        'наименование': 'product_name'
     }
     
     if original_name in special_mappings:
@@ -228,19 +284,11 @@ def _sanitize_column_name(name: str) -> str:
     if not name:
         return 'unknown_column_0'
     
-    # Add numeric suffix if we detect this might be a duplicate
-    if name.startswith('none_') or name.startswith('unknown_'):
-        try:
-            suffix = int(name.split('_')[-1])
-            return f'unknown_column_{suffix}'
-        except (ValueError, IndexError):
-            pass
-    
     return name if name else 'unknown_column_0'
 
 def _create_stage_table(conn: engine.Connection, table_name: str, 
                        df: pd.DataFrame, schema: str = 'magnit') -> None:
-    """Create table in stage schema with proper data types for Magnit."""
+    """Create table in stage schema with proper data types."""
     df = df[[col for col in df.columns 
             if not (col.startswith('none_') or 
                    col.startswith('unknown_column_'))]]
@@ -260,13 +308,13 @@ def _create_stage_table(conn: engine.Connection, table_name: str,
         if not col:
             continue
             
-        # Magnit-specific type handling
+        # Type handling
         if col in ColumnConfig.NUMERIC_COLS:
-            col_type = 'DECIMAL(18, 2)'  # More precise for financial data
+            col_type = 'DECIMAL(18, 2)'
         elif 'date' in col or 'month' in col:
             col_type = 'DATE'
         else:
-            col_type = 'NVARCHAR(255)'  # Longer strings for product names
+            col_type = 'NVARCHAR(255)'
     
         safe_columns.append(f'[{col}] {col_type}')
     
@@ -297,7 +345,7 @@ def _create_stage_table(conn: engine.Connection, table_name: str,
 
 def _bulk_insert_data(conn: engine.Connection, table_name: str, 
                      df: pd.DataFrame, schema: str = 'magnit') -> None:
-    """Insert data only if table is empty, with Magnit-specific optimizations."""
+    """Insert data only if table is empty."""
     if df.empty:
         logger.warning("Empty DataFrame, skipping insert")
         return
@@ -315,7 +363,7 @@ def _bulk_insert_data(conn: engine.Connection, table_name: str,
         logger.info(f"Table [{schema}].[{table_name}] already contains data ({row_count} rows), skipping insert")
         return
 
-    # Prepare data with Magnit-specific handling
+    # Prepare data with proper handling
     data = []
     for row in df.itertuples(index=False):
         processed_row = []
@@ -325,7 +373,7 @@ def _bulk_insert_data(conn: engine.Connection, table_name: str,
             elif 'date' in col or 'month' in col:
                 processed_val = str(val) if pd.notna(val) else None
             else:
-                processed_val = str(val)[:500] if pd.notna(val) else ''  # Truncate long strings
+                processed_val = str(val)[:500] if pd.notna(val) else ''
             processed_row.append(processed_val)
         data.append(tuple(processed_row))
 
@@ -352,7 +400,7 @@ def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine,
                         stage_engine: engine.Engine, stage_schema: str = 'magnit', 
                         limit: int = None) -> None:
     """
-    Convert data from raw to stage schema for Magnit.
+    Convert data from raw to stage schema.
     
     Args:
         table_name: Name of the table in raw schema
@@ -363,7 +411,7 @@ def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine,
     """
     try:
         start_time = datetime.now()
-        logger.info(f"[Stage] Starting processing of Magnit table {table_name}")
+        logger.info(f"[Stage] Starting processing of table {table_name}")
         
         # 1. Get actual column names from raw
         with raw_engine.connect() as conn:
@@ -384,14 +432,25 @@ def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine,
                 logger.error(f"Error getting table metadata: {e}")
                 raise
 
-        # 2. Filter RENAME_MAP for existing columns
+        # 2. Read sample data to detect year
+        with raw_engine.connect() as conn:
+            sample_df = pd.read_sql(
+                text(f"SELECT TOP 100 * FROM raw.{table_name}"),
+                conn
+            )
+        
+        year = _detect_year(sample_df)
+        logger.info(f"Detected data format year: {year}")
+        
+        # 3. Select appropriate rename map
+        rename_map = ColumnConfig.RENAME_MAP_2024 if year == 2024 else ColumnConfig.RENAME_MAP_2025
         valid_rename_map = {
-            ru: en for ru, en in ColumnConfig.RENAME_MAP.items() 
+            ru: en for ru, en in rename_map.items() 
             if ru in actual_columns
         }
         logger.info(f"Active RENAME_MAP: {valid_rename_map}")
 
-        # 3. Read data with chunking
+        # 4. Read data with chunking
         chunks: List[pd.DataFrame] = []
         query = f"SELECT * FROM raw.{table_name}"
         if limit is not None:
@@ -402,15 +461,21 @@ def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine,
                 for chunk in pd.read_sql(
                     text(query),
                     conn,
-                    chunksize=100000,  # Larger chunks for Magnit data
+                    chunksize=100000,
                     dtype='object'
                 ):
                     chunk.columns = [col.lower().replace(' ', '_') for col in chunk.columns]
                     logger.info(f"Processing chunk with {len(chunk)} rows")
                     
                     try:
-                        chunk = _convert_numeric_columns(chunk)
-                        chunk = _convert_string_columns(chunk)
+                        # Apply year-specific processing
+                        if year == 2024:
+                            chunk = _process_2024_data(chunk)
+                        else:
+                            chunk = _process_2025_data(chunk)
+                            
+                        chunk = _convert_numeric_columns(chunk, year)
+                        chunk = _convert_string_columns(chunk, year)
                         chunks.append(chunk)
                     except Exception as e:
                         logger.error(f"Error processing chunk: {e}")
@@ -429,14 +494,15 @@ def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine,
             logger.warning("[Stage] No data to process")
             return
 
-        # 4. Combine chunks
+        # 5. Combine chunks
         df = pd.concat(chunks, ignore_index=True)
         if limit is not None:
             df = df.head(limit)
-        # Удаляем ненужные колонки
+            
+        # Remove unused columns
         columns_to_drop = [col for col in df.columns 
-                        if col.startswith('none_') or 
-                        col.startswith('unknown_column_')]
+                         if col.startswith('none_') or 
+                         col.startswith('unknown_column_')]
         df = df.drop(columns=columns_to_drop, errors='ignore')
         
         logger.info(f"Final DataFrame shape after dropping unused columns: {df.shape}")
@@ -446,7 +512,7 @@ def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine,
         if df.empty or len(df.columns) == 0:
             raise ValueError("DataFrame contains no data or columns after processing")
         
-        # 5. Load to stage
+        # 6. Load to stage
         with stage_engine.connect() as conn:
             trans = None
             try:
@@ -469,5 +535,5 @@ def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine,
                 raise
                 
     except Exception as e:
-        logger.error(f"[Stage ERROR] Error processing Magnit table {table_name}: {str(e)}")
+        logger.error(f"[Stage ERROR] Error processing table {table_name}: {str(e)}")
         raise

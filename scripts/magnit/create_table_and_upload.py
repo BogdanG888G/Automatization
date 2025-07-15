@@ -187,7 +187,7 @@ class MagnitTableProcessor:
         start_time = time.time()
         file_name = os.path.basename(file_path)
         base_name = os.path.splitext(file_name)[0]
-        table_name = 'magnit_' + re.sub(r'\W+', '_', base_name.lower())
+        table_name = re.sub(r'\W+', '_', base_name.lower())
 
         logger.info(f"Начало обработки файла: {file_name} (будет прочитано максимум {cls.MAX_ROWS} строк)")
         
