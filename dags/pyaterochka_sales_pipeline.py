@@ -23,7 +23,7 @@ DEFAULT_CONN_STAGE = (
     "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
 )
 
-class MagnitConfig:
+class PyaterochkaConfig:
     MAX_CONCURRENT_TASKS = 4
     MAX_FILES_PER_RUN = 8
     TASK_TIMEOUT = timedelta(minutes=45)
@@ -32,14 +32,14 @@ class MagnitConfig:
     DATA_DIR = "/opt/airflow/data"
     ARCHIVE_DIR = "/opt/airflow/archive"
     ALLOWED_EXT = {'.csv', '.xlsx', '.xls', '.xlsb'}  # Added .xlsb
-    FILE_PREFIX = "magnit_"
-    STAGE_SCHEMA = "magnit"
+    FILE_PREFIX = "pyaterochka_"
+    STAGE_SCHEMA = "pyaterochka"
 
     @staticmethod
     def get_processing_pool():
         try:
             pools = Variable.get("airflow_pools", default_var="default_pool")
-            return "magnit_file_pool" if "magnit_file_pool" in pools.split(",") else "default_pool"
+            return "pyaterochka_file_pool" if "pyaterochka_file_pool" in pools.split(",") else "default_pool"
         except:
             return "default_pool"
 
@@ -53,7 +53,7 @@ class MagnitConfig:
         'pool_recycle': 3600,
         'connect_args': {
             'timeout': 900,
-            'application_name': 'airflow_magnit_loader'
+            'application_name': 'airflow_pyaterochka_loader'
         }
     }
 
@@ -77,7 +77,7 @@ def get_engine(db_type: str):
             else:
                 raise ValueError(f"Unknown DB type: {db_type}")
 
-            _engine_cache[db_type] = create_engine(conn_str, **MagnitConfig.CONN_SETTINGS)
+            _engine_cache[db_type] = create_engine(conn_str, **PyaterochkaConfig.CONN_SETTINGS)
         except Exception as e:
             logging.error(f"Error creating engine for {db_type}: {str(e)}")
             raise
@@ -91,8 +91,8 @@ def detect_file_encoding(file_path: str) -> str:
         result = chardet.detect(raw_data)
         return result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
 
-def preprocess_magnit_file(file_path: str) -> str:
-    """Pre-process Magnit files that might have parsing issues"""
+def preprocess_pyaterochka_file(file_path: str) -> str:
+    """Pre-process Pyaterochka files that might have parsing issues"""
     if file_path.endswith('.xlsb'):
         return file_path  # Skip preprocessing for binary files
         
@@ -122,8 +122,8 @@ def preprocess_magnit_file(file_path: str) -> str:
         logging.error(f"File preprocessing error: {str(e)}")
         return file_path
 
-def read_magnit_file(file_path: str, max_rows: Optional[int] = None) -> Optional[pd.DataFrame]:
-    """Read Magnit file with optional row limit"""
+def read_pyaterochka_file(file_path: str, max_rows: Optional[int] = None) -> Optional[pd.DataFrame]:
+    """Read Pyaterochka file with optional row limit"""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
     
@@ -179,7 +179,7 @@ def read_magnit_file(file_path: str, max_rows: Optional[int] = None) -> Optional
             except:
                 continue
     
-    processed_path = preprocess_magnit_file(file_path)
+    processed_path = preprocess_pyaterochka_file(file_path)
     try:
         if processed_path.endswith('.csv'):
             return pd.read_csv(processed_path, delimiter=';', decimal='.', thousands=' ')
@@ -192,27 +192,27 @@ def read_magnit_file(file_path: str, max_rows: Optional[int] = None) -> Optional
     return None
 
 @task(
-    task_id="scan_magnit_files",
+    task_id="scan_pyaterochka_files",
     retries=2,
     retry_delay=timedelta(minutes=1),
-    execution_timeout=MagnitConfig.TASK_TIMEOUT,
-    pool=MagnitConfig.PROCESSING_POOL,
+    execution_timeout=PyaterochkaConfig.TASK_TIMEOUT,
+    pool=PyaterochkaConfig.PROCESSING_POOL,
     pool_slots=1
 )
-def scan_magnit_files() -> List[str]:
-    """Scan for Magnit files matching criteria"""
+def scan_pyaterochka_files() -> List[str]:
+    """Scan for Pyaterochka files matching criteria"""
     try:
         valid_files = []
         total_size = 0
 
-        logging.info(f"Scanning directory: {MagnitConfig.DATA_DIR}")
-        if not os.path.exists(MagnitConfig.DATA_DIR):
-            raise FileNotFoundError(f"Directory not found: {MagnitConfig.DATA_DIR}")
+        logging.info(f"Scanning directory: {PyaterochkaConfig.DATA_DIR}")
+        if not os.path.exists(PyaterochkaConfig.DATA_DIR):
+            raise FileNotFoundError(f"Directory not found: {PyaterochkaConfig.DATA_DIR}")
 
-        for root, _, files in os.walk(MagnitConfig.DATA_DIR):
+        for root, _, files in os.walk(PyaterochkaConfig.DATA_DIR):
             for f in files:
-                if ('magnit' in f.lower() and 
-                    os.path.splitext(f)[1].lower() in MagnitConfig.ALLOWED_EXT):
+                if ('pyaterochka' in f.lower() and 
+                    os.path.splitext(f)[1].lower() in PyaterochkaConfig.ALLOWED_EXT):
                     
                     file_path = os.path.join(root, f)
                     file_size = os.path.getsize(file_path)
@@ -221,36 +221,36 @@ def scan_magnit_files() -> List[str]:
                         logging.warning(f"Skipping empty file: {file_path}")
                         continue
 
-                    if total_size + file_size > MagnitConfig.MAX_FILE_SIZE:
+                    if total_size + file_size > PyaterochkaConfig.MAX_FILE_SIZE:
                         logging.warning(f"File size limit exceeded. Skipping {file_path}")
                         continue
 
                     valid_files.append(file_path)
                     total_size += file_size
 
-                    if len(valid_files) >= MagnitConfig.MAX_FILES_PER_RUN:
+                    if len(valid_files) >= PyaterochkaConfig.MAX_FILES_PER_RUN:
                         break
 
-            if len(valid_files) >= MagnitConfig.MAX_FILES_PER_RUN:
+            if len(valid_files) >= PyaterochkaConfig.MAX_FILES_PER_RUN:
                 break
 
-        logging.info(f"Found {len(valid_files)} Magnit files (total size: {total_size / 1024 / 1024:.2f} MB)")
-        return valid_files[:MagnitConfig.MAX_FILES_PER_RUN]
+        logging.info(f"Found {len(valid_files)} Pyaterochka files (total size: {total_size / 1024 / 1024:.2f} MB)")
+        return valid_files[:PyaterochkaConfig.MAX_FILES_PER_RUN]
 
     except Exception as e:
         logging.error(f"File scanning error: {str(e)}", exc_info=True)
         raise
 
 @task(
-    task_id="process_magnit_file",
+    task_id="process_pyaterochka_file",
     retries=3,
     retry_delay=timedelta(minutes=5),
-    execution_timeout=MagnitConfig.TASK_TIMEOUT,
-    pool=MagnitConfig.PROCESSING_POOL,
+    execution_timeout=PyaterochkaConfig.TASK_TIMEOUT,
+    pool=PyaterochkaConfig.PROCESSING_POOL,
     pool_slots=1
 )
-def process_magnit_file(file_path: str):
-    """Process a single Magnit file"""
+def process_pyaterochka_file(file_path: str):
+    """Process a single Pyaterochka file"""
     try:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -262,7 +262,7 @@ def process_magnit_file(file_path: str):
             archive_empty_file(file_path, empty=True)
             return
 
-        df = read_magnit_file(file_path, max_rows=10000)
+        df = read_pyaterochka_file(file_path, max_rows=10000)
         if df is None or df.empty:
             logging.error(f"Failed to read data from file: {file_path}")
             # Move problematic file to archive with _ERROR suffix
@@ -272,9 +272,9 @@ def process_magnit_file(file_path: str):
         # Database operations
         engine_test = get_engine('test')
         try:
-            from magnit.create_table_and_upload import create_magnit_table_and_upload
-            table_name = create_magnit_table_and_upload(file_path, engine=engine_test)
-            logging.info(f"Magnit data loaded to raw.{table_name}")
+            from pyaterochka.create_table_and_upload import create_pyaterochka_table_and_upload
+            table_name = create_pyaterochka_table_and_upload(file_path, engine=engine_test)
+            logging.info(f"Pyaterochka data loaded to raw.{table_name}")
         except exc.SQLAlchemyError as e:
             engine_test.dispose()
             logging.error(f"Raw load error: {str(e)}")
@@ -283,15 +283,15 @@ def process_magnit_file(file_path: str):
 
         engine_stage = get_engine('stage')
         try:
-            from magnit.convert_raw_to_stage import convert_raw_to_stage
+            from pyaterochka.convert_raw_to_stage import convert_raw_to_stage
             convert_raw_to_stage(
                 table_name=table_name,
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
-                stage_schema=MagnitConfig.STAGE_SCHEMA,
+                stage_schema=PyaterochkaConfig.STAGE_SCHEMA,
                 limit = 10000
             )
-            logging.info("Magnit data loaded to stage")
+            logging.info("Pyaterochka data loaded to stage")
         except exc.SQLAlchemyError as e:
             engine_stage.dispose()
             logging.error(f"Stage load error: {str(e)}")
@@ -305,18 +305,18 @@ def process_magnit_file(file_path: str):
         archive_empty_file(file_path)
 
     except Exception as e:
-        logging.error(f"Magnit file processing error: {file_path} - {str(e)}", exc_info=True)
+        logging.error(f"Pyaterochka file processing error: {file_path} - {str(e)}", exc_info=True)
         archive_empty_file(file_path, error=True)
         raise
 
 def archive_empty_file(file_path: str, empty: bool = False, error: bool = False):
     """Archive file with appropriate suffix"""
-    os.makedirs(MagnitConfig.ARCHIVE_DIR, exist_ok=True)
+    os.makedirs(PyaterochkaConfig.ARCHIVE_DIR, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     ext = os.path.splitext(file_path)[1]
     
     archive_name = f"{base_name}"
-    archive_path = os.path.join(MagnitConfig.ARCHIVE_DIR, archive_name)
+    archive_path = os.path.join(PyaterochkaConfig.ARCHIVE_DIR, archive_name)
     
     try:
         shutil.move(file_path, archive_path)
@@ -329,26 +329,26 @@ default_args = {
     'retries': 2,
     'retry_delay': timedelta(minutes=5),
     'depends_on_past': False,
-    'max_active_tis_per_dag': MagnitConfig.MAX_CONCURRENT_TASKS,
+    'max_active_tis_per_dag': PyaterochkaConfig.MAX_CONCURRENT_TASKS,
 }
 
 with DAG(
-    dag_id="magnit_sales_pipeline_optimized",
+    dag_id="pyaterochka_sales_pipeline_optimized",
     default_args=default_args,
     start_date=datetime(2025, 7, 1),
     schedule_interval=None,
     catchup=False,
-    max_active_tasks=MagnitConfig.MAX_CONCURRENT_TASKS,
-    concurrency=MagnitConfig.MAX_CONCURRENT_TASKS,
-    tags=["magnit", "optimized"],
+    max_active_tasks=PyaterochkaConfig.MAX_CONCURRENT_TASKS,
+    concurrency=PyaterochkaConfig.MAX_CONCURRENT_TASKS,
+    tags=["pyaterochka", "optimized"],
 ) as dag:
 
     start = EmptyOperator(task_id="start")
     end = EmptyOperator(task_id="end")
 
-    scanned_files = scan_magnit_files()
+    scanned_files = scan_pyaterochka_files()
 
-    with TaskGroup("magnit_file_processing_group") as processing_group:
-        process_magnit_file.expand(file_path=scanned_files)
+    with TaskGroup("pyaterochka_file_processing_group") as processing_group:
+        process_pyaterochka_file.expand(file_path=scanned_files)
 
     start >> scanned_files >> processing_group >> end
