@@ -23,8 +23,8 @@ DEFAULT_CONN_STAGE = (
 )
 
 class Config:
-    MAX_CONCURRENT_TASKS = 8
-    MAX_FILES_PER_RUN = 20
+    MAX_CONCURRENT_TASKS = 2
+    MAX_FILES_PER_RUN = 5
     TASK_TIMEOUT = timedelta(minutes=30)
     MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
@@ -46,7 +46,7 @@ class Config:
     POOL_SLOTS = 4
 
     CONN_SETTINGS = {
-        'pool_size': 5,
+        'pool_size': 1,
         'max_overflow': 2,
         'pool_timeout': 30,
         'pool_recycle': 3600,
@@ -209,7 +209,7 @@ def process_file(file_path: str):
 
         elif file_path.lower().endswith(('.xlsx', '.xls', '.xlsb')):
             from common.convert_xlsx_to_csv import convert_excel_to_csv
-            csv_paths = convert_excel_to_csv(file_path, max_rows=100000)
+            csv_paths = convert_excel_to_csv(file_path, max_rows=10000)
             logging.info(f"Converted Excel to CSV files: {csv_paths}")
             # Если несколько csv, можно брать первый (или расширить логику)
             file_path = csv_paths[0]
