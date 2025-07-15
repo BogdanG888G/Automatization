@@ -1,130 +1,473 @@
 import pandas as pd
 import logging
-from sqlalchemy import text
+from sqlalchemy import text, exc, engine
 from contextlib import closing
 import numpy as np
+from typing import Dict, Any, List
+from datetime import datetime
+import re
 
 logger = logging.getLogger(__name__)
 
 class ColumnConfig:
+    """Column configuration with data types and transformations for Magnit."""
     NUMERIC_COLS = {
-        'average_sell_price': {'dtype': 'float64', 'default': 0.0},
+        'turnover_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'turnover_quantity': {'dtype': 'float64', 'default': 0.0},
+        'incoming_price': {'dtype': 'float64', 'default': 0.0},
+        'avg_sell_price': {'dtype': 'float64', 'default': 0.0},
         'writeoff_amount_rub': {'dtype': 'float64', 'default': 0.0},
         'writeoff_quantity': {'dtype': 'float64', 'default': 0.0},
         'sales_amount_rub': {'dtype': 'float64', 'default': 0.0},
         'sales_weight_kg': {'dtype': 'float64', 'default': 0.0},
         'sales_quantity': {'dtype': 'float64', 'default': 0.0},
-        'average_cost_price': {'dtype': 'float64', 'default': 0.0},
+        'avg_purchase_price': {'dtype': 'float64', 'default': 0.0},
         'margin_amount_rub': {'dtype': 'float64', 'default': 0.0},
         'loss_amount_rub': {'dtype': 'float64', 'default': 0.0},
         'loss_quantity': {'dtype': 'float64', 'default': 0.0},
-        'promo_sales_amount_rub': {'dtype': 'float64', 'default': 0.0}
+        'promo_sales_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'stock_quantity': {'dtype': 'float64', 'default': 0.0},
+        'stock_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'discount_amount_rub': {'dtype': 'float64', 'default': 0.0}
     }
     
     RENAME_MAP = {
-        'Дата': 'sales_date',
-        'Сегмент': 'product_segment',
-        'СЕМЬЯ': 'product_family_code',
-        'НАЗВАНИЕ СЕМЬИ': 'product_family_name',
-        'АРТИКУЛ': 'product_article',
-        'НАИМЕНОВАНИЕ': 'product_name',
-        'ПОСТАВЩИК': 'supplier_code',
-        'НАИМЕНОВАНИЕ ПОСТАВЩИКА': 'supplier_name',
-        'Магазин': 'store_code',
-        'Город': 'city',
-        'Адрес': 'store_address',
-        'Формат': 'store_format',
-        'Месяц': 'month_name',
-        'Ср.цена продажи': 'average_sell_price',
-        'Списания, руб.': 'writeoff_amount_rub',
-        'Списания, шт.': 'writeoff_quantity',
-        'Продажи, c НДС': 'sales_amount_rub',
-        'Продажи, кг': 'sales_weight_kg',
-        'Продажи, шт': 'sales_quantity',
-        'Ср.цена покупки': 'average_cost_price',
-        'Маржа, руб.': 'margin_amount_rub',
-        'Потери, руб.': 'loss_amount_rub',
-        'Потери,шт': 'loss_quantity',
-        'Промо Продажи, c НДС': 'promo_sales_amount_rub'
+        'month': 'sales_month',
+        'формат': 'store_format',
+        'наименование_тт': 'store_name',
+        'код_тт': 'store_code',
+        'адрес_тт': 'store_address',
+        'уровень_1': 'product_level_1',
+        'уровень_2': 'product_level_2',
+        'уровень_3': 'product_level_3',
+        'уровень_4': 'product_level_4',
+        'поставщик': 'supplier_name',
+        'бренд': 'brand',
+        'наименование_тп': 'product_name',
+        'код_тп': 'product_code',
+        'шк': 'barcode',
+        'оборот_руб': 'turnover_amount_rub',
+        'оборот_шт': 'turnover_quantity',
+        'входящая_цена': 'incoming_price',
+        'дата': 'sales_date',
+        'код_группы': 'product_group_code',
+        'группа': 'product_group_name',
+        'код_категории': 'product_category_code',
+        'категория': 'product_category_name',
+        'код_подкатегории': 'product_subcategory_code',
+        'подкатегория': 'product_subcategory_name',
+        'артикул': 'product_article',
+        'код_поставщика': 'supplier_code',
+        'регион': 'region',
+        'город': 'city',
+        'ср_цена_продажи': 'avg_sell_price',
+        'списания_руб': 'writeoff_amount_rub',
+        'списания_шт': 'writeoff_quantity',
+        'продажи_руб': 'sales_amount_rub',
+        'продажи_кг': 'sales_weight_kg',
+        'продажи_шт': 'sales_quantity',
+        'маржа_руб': 'margin_amount_rub',
+        'потери_руб': 'loss_amount_rub',
+        'потери_шт': 'loss_quantity',
+        'промо_продажи_руб': 'promo_sales_amount_rub',
+        'остаток_шт': 'stock_quantity',
+        'остаток_руб': 'stock_amount_rub',
+        'скидка_руб': 'discount_amount_rub',
+        'код': 'store_code',
+        'адрес': 'store_address',
+        'уровень': 'product_level',
+        'наименование': 'product_name',
+        'none_18': 'unknown_column_18',
+        'none_19': 'unknown_column_19',
+        'none_20': 'unknown_column_20',
+        'none_21': 'unknown_column_21',
+        'none_22': 'unknown_column_22',
+        'none_23': 'unknown_column_23'
     }
 
-def convert_raw_to_stage(table_name: str, raw_engine, stage_engine, stage_schema='magnit'):
-    """Загрузка из raw в stage с преобразованием данных."""
-    try:
-        # 1. Получаем количество строк для прогресс-индикации
-        with raw_engine.connect() as conn:
-            total_count = conn.execute(text(f"SELECT COUNT(*) FROM raw.{table_name}")).scalar()
-            logger.info(f"[Stage] Начинаем загрузку {total_count} строк из raw.{table_name}")
-
-        # 2. Читаем данные из raw по частям
-        chunks = []
-        total_rows = 0
-        for chunk in pd.read_sql_table(table_name, raw_engine, schema='raw', chunksize=50000):
-            chunks.append(chunk)
-            total_rows += len(chunk)
-            logger.info(f"[Stage] Считано {total_rows}/{total_count} строк ({total_rows/total_count:.1%})")
-
-        if not chunks:
-            logger.warning("[Stage] Нет данных для обработки")
-            return
-
-        df = pd.concat(chunks, ignore_index=True)
-        del chunks
-
-        # 3. Переименование колонок (если в raw русские названия)
-        df.rename(columns=ColumnConfig.RENAME_MAP, inplace=True)
-
-        # 4. Преобразование числовых колонок (векторно)
-        for col in ColumnConfig.NUMERIC_COLS.keys():
-            if col in df.columns:
-                df[col] = (
-                    df[col]
+def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert numeric columns with specific format handling for Magnit."""
+    logger.info(f"Original columns: {df.columns.tolist()}")
+    
+    # Normalize column names
+    df.columns = [col.lower().replace(' ', '_') for col in df.columns]
+    
+    # Add specific numeric columns to process
+    numeric_cols = {
+        'оборот_руб': 'turnover_amount_rub',
+        'оборот_шт': 'turnover_quantity',
+        'входящая_цена': 'incoming_price',
+        'ср_цена_продажи': 'avg_sell_price',
+        'списания_руб': 'writeoff_amount_rub',
+        'списания_шт': 'writeoff_quantity',
+        'продажи_руб': 'sales_amount_rub',
+        'продажи_кг': 'sales_weight_kg',
+        'продажи_шт': 'sales_quantity',
+        'ср_цена_закупки': 'avg_purchase_price',
+        'маржа_руб': 'margin_amount_rub',
+        'потери_руб': 'loss_amount_rub',
+        'потери_шт': 'loss_quantity',
+        'промо_продажи_руб': 'promo_sales_amount_rub',
+        'остаток_шт': 'stock_quantity',
+        'остаток_руб': 'stock_amount_rub',
+        'скидка_руб': 'discount_amount_rub'
+    }
+    
+    for ru_col, en_col in numeric_cols.items():
+        if ru_col in df.columns:
+            try:
+                # Magnit often uses comma as decimal separator and spaces as thousand separators
+                df[en_col] = (
+                    df[ru_col]
                     .astype(str)
-                    .str.replace(r'[,\s]', '.', regex=True)
-                    .replace({'': '0', None: '0'})
+                    .str.replace(',', '.', regex=False)
+                    .str.replace(r'[^\d.]', '', regex=True)
+                    .replace('', '0')
                     .astype(np.float64)
                     .fillna(0)
                 )
+                df.drop(ru_col, axis=1, inplace=True)
+            except Exception as e:
+                logger.error(f"Error converting column {ru_col}: {e}")
+                raise
+    
+    logger.info(f"Columns after numeric conversion: {df.columns.tolist()}")
+    return df
 
-        # 5. Преобразование остальных колонок в строки
-        for col in df.columns:
-            if col not in ColumnConfig.NUMERIC_COLS:
-                df[col] = df[col].astype(str).fillna('')
-
-        # 6. Создание таблицы в stage, если не существует
-        with closing(stage_engine.connect()) as conn:
-            create_sql = f"""
-            IF NOT EXISTS (SELECT * FROM sys.tables t
-                JOIN sys.schemas s ON t.schema_id = s.schema_id
-                WHERE s.name = '{stage_schema}' AND t.name = '{table_name}')
-            BEGIN
-                CREATE TABLE {stage_schema}.{table_name} (
-                    {', '.join([
-                        f"{col} FLOAT" if col in ColumnConfig.NUMERIC_COLS else f"{col} NVARCHAR(255)"
-                        for col in df.columns
-                    ])}
+def _convert_string_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert string columns to English names for Magnit."""
+    df.columns = [col.lower().replace(' ', '_') for col in df.columns]
+    
+    for ru_col, en_col in ColumnConfig.RENAME_MAP.items():
+        if ru_col in df.columns:
+            try:
+                # Magnit sometimes has mixed encodings, so we handle carefully
+                df[en_col] = (
+                    df[ru_col]
+                    .astype(str)
+                    .str.normalize('NFKC')  # Normalize unicode
+                    .str.replace(r'[\x00-\x1F\x7F-\x9F]', '', regex=True)  # Remove control chars
+                    .str.strip()
+                    .fillna('')
                 )
-            END
-            """
-            conn.execute(text(create_sql))
-            conn.commit()
+                if ru_col != en_col:
+                    df.drop(ru_col, axis=1, inplace=True)
+            except Exception as e:
+                logger.error(f"Error converting string column {ru_col}: {e}")
+                raise
+    
+    return df
 
-            # 7. Очищаем таблицу перед загрузкой
-            conn.execute(text(f"TRUNCATE TABLE {stage_schema}.{table_name}"))
-            conn.commit()
+def _sanitize_column_name(name: str) -> str:
+    """Sanitize column name for SQL Server with Magnit-specific handling."""
+    if not name or not isinstance(name, str):
+        return 'unknown_column_0'
+    
+    original_name = name.lower()
+    
+    # Special mappings for Magnit-specific columns
+    special_mappings = {
+        'списания_руб': 'writeoff_amount_rub',
+        'списания_шт': 'writeoff_quantity',
+        'продажи_руб': 'sales_amount_rub',
+        'потери_руб': 'loss_amount_rub',
+        'потери_шт': 'loss_quantity',
+        'промо_продажи_руб': 'promo_sales_amount_rub',
+        'маржа_руб': 'margin_amount_rub',
+        'ср_цена_продажи': 'avg_sell_price',
+        'ср_цена_закупки': 'avg_purchase_price',
+        'остаток_шт': 'stock_quantity',
+        'остаток_руб': 'stock_amount_rub',
+        'оборот_руб': 'turnover_amount_rub',
+        'оборот_шт': 'turnover_quantity',
+        'входящая_цена': 'incoming_price',
+        'наименование_тт': 'store_name',
+        'код_тт': 'store_code',
+        'адрес_тт': 'store_address',
+        'уровень_1': 'product_level_1',
+        'уровень_2': 'product_level_2',
+        'уровень_3': 'product_level_3',
+        'уровень_4': 'product_level_4',
+        'наименование_тп': 'product_name',
+        'код_тп': 'product_code',
+        'шк': 'barcode',
+        'себестоимсть_в_руб.': 'cost_price_rub',
+        'quantity_sold': 'sales_quantity',
+        'sales_amount': 'sales_amount_rub',
+        'код': 'store_code',
+        'адрес': 'store_address',
+        'уровень': 'product_level',
+        'наименование': 'product_name',
+        'себестоимсть_в_руб.': 'cost_price_rub',
+        'quantity_sold': 'sales_quantity',
+        'sales_amount': 'sales_amount_rub',
+        'none_18': 'unknown_column_18',
+        'none_19': 'unknown_column_19',
+        'none_20': 'unknown_column_20',
+        'none_21': 'unknown_column_21',
+        'none_22': 'unknown_column_22',
+        'none_23': 'unknown_column_23'
+    }
+    
+    if original_name in special_mappings:
+        return special_mappings[original_name]
+    
+    # Handle numbered none_ columns
+    if original_name.startswith('none_'):
+        try:
+            num = int(original_name.split('_')[1])
+            return f'unknown_column_{num}'
+        except (ValueError, IndexError):
+            pass
 
-            # 8. Быстрая пакетная вставка через pyodbc (fast_executemany)
-            with conn.connection.cursor() as cursor:
-                cursor.fast_executemany = True
-                cols = ', '.join(df.columns)
-                params = ', '.join(['?'] * len(df.columns))
-                insert_sql = f"INSERT INTO {stage_schema}.{table_name} ({cols}) VALUES ({params})"
-                data = [tuple(x) for x in df.to_records(index=False)]
-                cursor.executemany(insert_sql, data)
-            conn.commit()
+    # Preserve some original info in unknown columns
+    name = re.sub(r'[^a-zA-Z0-9_]', '_', original_name)
+    name = re.sub(r'_{2,}', '_', name)
+    name = name.strip('_')
+    
+    if not name:
+        return 'unknown_column_0'
+    
+    # Add numeric suffix if we detect this might be a duplicate
+    if name.startswith('none_') or name.startswith('unknown_'):
+        try:
+            suffix = int(name.split('_')[-1])
+            return f'unknown_column_{suffix}'
+        except (ValueError, IndexError):
+            pass
+    
+    return name if name else 'unknown_column_0'
 
-        logger.info(f"[Stage] Успешно загружено {len(df)} строк в {stage_schema}.{table_name}")
-
+def _create_stage_table(conn: engine.Connection, table_name: str, 
+                       df: pd.DataFrame, schema: str = 'magnit') -> None:
+    """Create table in stage schema with proper data types for Magnit."""
+    df = df[[col for col in df.columns 
+            if not (col.startswith('none_') or 
+                   col.startswith('unknown_column_'))]]
+    logger.info(f"DataFrame columns before table creation: {df.columns.tolist()}")
+    
+    df.columns = [_sanitize_column_name(col) for col in df.columns]
+    
+    # Remove any empty column names that might have been created
+    df.columns = [col if col else f'unknown_column_{i}' for i, col in enumerate(df.columns)]
+    
+    if len(df.columns) != len(set(df.columns)):
+        duplicates = [col for col in df.columns if list(df.columns).count(col) > 1]
+        raise ValueError(f"Duplicate column names after sanitization: {duplicates}")
+    
+    safe_columns = []
+    for col in df.columns:
+        if not col:
+            continue
+            
+        # Magnit-specific type handling
+        if col in ColumnConfig.NUMERIC_COLS:
+            col_type = 'DECIMAL(18, 2)'  # More precise for financial data
+        elif 'date' in col or 'month' in col:
+            col_type = 'DATE'
+        else:
+            col_type = 'NVARCHAR(255)'  # Longer strings for product names
+    
+        safe_columns.append(f'[{col}] {col_type}')
+    
+    if not safe_columns:
+        raise ValueError("No valid columns to create table")
+    
+    create_table_sql = f"""
+        IF NOT EXISTS (SELECT * FROM sys.tables t 
+                      JOIN sys.schemas s ON t.schema_id = s.schema_id 
+                      WHERE s.name = '{schema}' AND t.name = '{table_name}')
+        BEGIN
+            CREATE TABLE [{schema}].[{table_name}] (
+                {', '.join(safe_columns)},
+                load_dt DATETIME DEFAULT GETDATE()
+            )
+        END
+    """
+    
+    try:
+        trans = conn.begin()
+        conn.execute(text(create_table_sql))
+        trans.commit()
     except Exception as e:
-        logger.error(f"[Stage ERROR] Ошибка при обработке таблицы {table_name}: {e}", exc_info=True)
+        if 'trans' in locals():
+            trans.rollback()
+        logger.error(f"Error creating table: {e}\nSQL: {create_table_sql}")
+        raise
+
+def _bulk_insert_data(conn: engine.Connection, table_name: str, 
+                     df: pd.DataFrame, schema: str = 'magnit') -> None:
+    """Insert data only if table is empty, with Magnit-specific optimizations."""
+    if df.empty:
+        logger.warning("Empty DataFrame, skipping insert")
+        return
+
+    safe_columns = [_sanitize_column_name(col) for col in df.columns if col]
+    if not safe_columns:
+        raise ValueError("No valid columns for insertion")
+
+    # Check if table already has data
+    row_count_result = conn.execute(
+        text(f"SELECT COUNT(*) FROM [{schema}].[{table_name}]")
+    )
+    row_count = row_count_result.scalar()
+    if row_count > 0:
+        logger.info(f"Table [{schema}].[{table_name}] already contains data ({row_count} rows), skipping insert")
+        return
+
+    # Prepare data with Magnit-specific handling
+    data = []
+    for row in df.itertuples(index=False):
+        processed_row = []
+        for val, col in zip(row, df.columns):
+            if col in ColumnConfig.NUMERIC_COLS:
+                processed_val = float(val) if pd.notna(val) else 0.0
+            elif 'date' in col or 'month' in col:
+                processed_val = str(val) if pd.notna(val) else None
+            else:
+                processed_val = str(val)[:500] if pd.notna(val) else ''  # Truncate long strings
+            processed_row.append(processed_val)
+        data.append(tuple(processed_row))
+
+    cols = ', '.join([f'[{col}]' for col in safe_columns])
+    params = ', '.join(['?'] * len(safe_columns))
+
+    raw_conn = conn.connection
+    cursor = raw_conn.cursor()
+
+    try:
+        cursor.fast_executemany = True
+        insert_sql = f"INSERT INTO [{schema}].[{table_name}] ({cols}) VALUES ({params})"
+        cursor.executemany(insert_sql, data)
+        raw_conn.commit()
+        logger.info(f"Inserted {len(df)} rows into [{schema}].[{table_name}]")
+    except Exception as e:
+        raw_conn.rollback()
+        logger.error(f"Error inserting data: {e}\nSQL: {insert_sql}")
+        raise
+    finally:
+        cursor.close()
+
+def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine, 
+                        stage_engine: engine.Engine, stage_schema: str = 'magnit', 
+                        limit: int = None) -> None:
+    """
+    Convert data from raw to stage schema for Magnit.
+    
+    Args:
+        table_name: Name of the table in raw schema
+        raw_engine: SQLAlchemy engine for raw database
+        stage_engine: SQLAlchemy engine for stage database
+        stage_schema: Name of stage schema (default 'magnit')
+        limit: Row limit for processing
+    """
+    try:
+        start_time = datetime.now()
+        logger.info(f"[Stage] Starting processing of Magnit table {table_name}")
+        
+        # 1. Get actual column names from raw
+        with raw_engine.connect() as conn:
+            try:
+                result = conn.execute(text(
+                    f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                    f"WHERE TABLE_SCHEMA = 'raw' AND TABLE_NAME = :table_name"
+                ), {'table_name': table_name})
+                actual_columns = [row[0].lower().replace(' ', '_') for row in result]
+                
+                logger.info(f"Actual columns in raw table: {actual_columns}")
+                
+                total_count = conn.execute(
+                    text(f"SELECT COUNT(*) FROM raw.{table_name}")
+                ).scalar()
+                logger.info(f"[Stage] Total rows to process: {total_count}")
+            except Exception as e:
+                logger.error(f"Error getting table metadata: {e}")
+                raise
+
+        # 2. Filter RENAME_MAP for existing columns
+        valid_rename_map = {
+            ru: en for ru, en in ColumnConfig.RENAME_MAP.items() 
+            if ru in actual_columns
+        }
+        logger.info(f"Active RENAME_MAP: {valid_rename_map}")
+
+        # 3. Read data with chunking
+        chunks: List[pd.DataFrame] = []
+        query = f"SELECT * FROM raw.{table_name}"
+        if limit is not None:
+            query += f" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
+        
+        with raw_engine.connect().execution_options(stream_results=True) as conn:
+            try:
+                for chunk in pd.read_sql(
+                    text(query),
+                    conn,
+                    chunksize=100000,  # Larger chunks for Magnit data
+                    dtype='object'
+                ):
+                    chunk.columns = [col.lower().replace(' ', '_') for col in chunk.columns]
+                    logger.info(f"Processing chunk with {len(chunk)} rows")
+                    
+                    try:
+                        chunk = _convert_numeric_columns(chunk)
+                        chunk = _convert_string_columns(chunk)
+                        chunks.append(chunk)
+                    except Exception as e:
+                        logger.error(f"Error processing chunk: {e}")
+                        raise
+                    
+                    processed_count = sum(len(c) for c in chunks)
+                    logger.info(f"[Stage] Processed {processed_count}/{limit if limit is not None else total_count} rows")
+                    
+                    if limit is not None and processed_count >= limit:
+                        break
+            except Exception as e:
+                logger.error(f"Error reading data: {e}")
+                raise
+
+        if not chunks:
+            logger.warning("[Stage] No data to process")
+            return
+
+        # 4. Combine chunks
+        df = pd.concat(chunks, ignore_index=True)
+        if limit is not None:
+            df = df.head(limit)
+        # Удаляем ненужные колонки
+        columns_to_drop = [col for col in df.columns 
+                        if col.startswith('none_') or 
+                        col.startswith('unknown_column_')]
+        df = df.drop(columns=columns_to_drop, errors='ignore')
+        
+        logger.info(f"Final DataFrame shape after dropping unused columns: {df.shape}")
+
+        del chunks
+        
+        if df.empty or len(df.columns) == 0:
+            raise ValueError("DataFrame contains no data or columns after processing")
+        
+        # 5. Load to stage
+        with stage_engine.connect() as conn:
+            trans = None
+            try:
+                trans = conn.begin()
+                
+                df.columns = [_sanitize_column_name(col) for col in df.columns]
+                _create_stage_table(conn, table_name, df, stage_schema)
+                _bulk_insert_data(conn, table_name, df, stage_schema)
+                
+                trans.commit()
+                
+                duration = (datetime.now() - start_time).total_seconds()
+                logger.info(
+                    f"[Stage] Successfully loaded {len(df)} rows in {duration:.2f} sec"
+                )
+            except Exception as e:
+                if trans:
+                    trans.rollback()
+                logger.error(f"Error loading to stage: {e}")
+                raise
+                
+    except Exception as e:
+        logger.error(f"[Stage ERROR] Error processing Magnit table {table_name}: {str(e)}")
         raise
