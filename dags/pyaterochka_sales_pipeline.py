@@ -310,20 +310,36 @@ def process_pyaterochka_file(file_path: str):
         raise
 
 def archive_empty_file(file_path: str, empty: bool = False, error: bool = False):
-    """Archive file with appropriate suffix"""
-    os.makedirs(PyaterochkaConfig.ARCHIVE_DIR, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(file_path))[0]
-    ext = os.path.splitext(file_path)[1]
-    
-    archive_name = f"{base_name}"
-    archive_path = os.path.join(PyaterochkaConfig.ARCHIVE_DIR, archive_name)
-    
+    """
+    Переместить файл в архивную директорию, сохранив исходное имя и расширение.
+    Параметры empty/error используются только для логов (сигнатура сохранена для обратной совместимости).
+    """
+    archive_dir = PyaterochkaConfig.ARCHIVE_DIR
+    os.makedirs(archive_dir, exist_ok=True)
+
+    file_name = os.path.basename(file_path)  # имя + расширение
+    archive_path = os.path.join(archive_dir, file_name)
+
+    # Если источник уже в архиве — ничего не делаем
+    if os.path.abspath(file_path) == os.path.abspath(archive_path):
+        logging.info(f"File already in archive: {archive_path}")
+        return
+
+    # метка для логов
+    if empty:
+        status = "EMPTY"
+    elif error:
+        status = "ERROR"
+    else:
+        status = "OK"
+
     try:
         shutil.move(file_path, archive_path)
-        logging.info(f"File archived: {archive_path}")
+        logging.info(f"File archived ({status}): {archive_path}")
     except Exception as e:
-        logging.error(f"Failed to archive file {file_path}: {str(e)}")
+        logging.error(f"Failed to archive file {file_path}: {e}")
 
+        
 default_args = {
     'owner': 'airflow',
     'retries': 2,

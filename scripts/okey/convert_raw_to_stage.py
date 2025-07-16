@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import re
 from datetime import datetime
@@ -6,13 +8,16 @@ from typing import List
 import numpy as np
 import pandas as pd
 from sqlalchemy import engine, exc, text
-import calendar
 
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------------ #
+# Column configuration                                                #
+# ------------------------------------------------------------------ #
 class ColumnConfig:
-    """Column configuration with data types and transformations for Pyaterochka."""
+    """Column configuration with data types and transformations for Okey."""
+
     NUMERIC_COLS = {
         "sales_amount_rub": {"dtype": "float64", "default": 0.0},
         "sales_quantity": {"dtype": "float64", "default": 0.0},
@@ -20,11 +25,52 @@ class ColumnConfig:
         "cost_price_rub": {"dtype": "float64", "default": 0.0},
     }
 
+    # первичное RU->eng нормализационное отображение (до унификации между сетями)
+    # сюда включаем разные варианты написания колонок из Excel/CSV
+    RAW_RU_NORMALIZE = {
+        # период / дата
+        "период": "period",
+        # сеть
+        "сеть": "retail_chain",
+        # категория
+        "категория": "category",
+        # категория 2 / вложенная категория -> base_type (потом product_type)
+        "категория_2": "base_type",
+        "категория2": "base_type",
+        # поставщик
+        "поставщик": "supplier",
+        "поставщики": "supplier",
+        # бренд
+        "бренд": "brand",
+        "бренды": "brand",
+        # наименование SKU
+        "наименование": "product_name",
+        # унифицированное наименование
+        "уни_наименование": "unified_product_name",
+        "уни_наим": "unified_product_name",
+        # граммовка
+        "граммовка": "weight",
+        # вкус
+        "вкус": "flavor",
+        "вкусы": "flavor",
+        # продажи
+        "продажи,_шт": "sales_units",
+        "продажи_шт": "sales_units",
+        "продажи,_руб": "sales_rub",
+        "продажи_руб": "sales_rub",
+        "продажи,_тонн": "sales_tonnes",
+        "продажи_тонн": "sales_tonnes",
+        # себестоимость
+        "себест.,_руб": "cost_rub",
+        "себест_руб": "cost_rub",
+    }
+
+    # окончательное отображение в stage (то, чем будут называться колонки в DWH)
     RENAME_MAP = {
         "period": "period",
         "retail_chain": "retail_chain",
         "category": "product_category",
-        "base_type": "product_type",
+        "base_type": "product_type",  # Категория 2 -> product_type
         "supplier": "supplier_name",
         "brand": "brand",
         "product_name": "product_name",
@@ -52,12 +98,53 @@ class ColumnConfig:
 
 
 # ------------------------------------------------------------------ #
-# Month parsing для Пятёрочки                                        #
+# Normalization helpers                                               #
 # ------------------------------------------------------------------ #
+def _normalize_okey_input_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize raw Okey column headers to internal English base names.
+
+    Works tolerant to punctuation, spaces & case. Example:
+    "Категория 2" -> "base_type"; "Период" -> "period".
+    """
+    normed = []
+    for col in df.columns:
+        c = str(col).strip().lower()
+        # унифицируем: пробелы/знаки -> _
+        c_key = re.sub(r"\s+", "_", c)
+        c_key = re.sub(r"[^a-zа-я0-9_\.]", "_", c_key)
+        # уберём двойные подчёркивания / запятые в коды
+        c_key = c_key.replace(",", "_").replace("..", ".")
+        c_key = re.sub(r"_+", "_", c_key).strip("_")
+
+        mapped = ColumnConfig.RAW_RU_NORMALIZE.get(c_key, c_key)
+        normed.append(mapped)
+
+    df.columns = normed
+    return df
+
+
+# ------------------------------------------------------------------ #
+# Month parsing                                                        #
+# ------------------------------------------------------------------ #
+_RU_MONTHS_SHORT = {
+    "ян": 1, "янв": 1,
+    "фе": 2, "фев": 2,
+    "мар": 3,
+    "апр": 4,
+    "май": 5,
+    "июн": 6,
+    "июл": 7,
+    "авг": 8,
+    "сен": 9, "сент": 9,
+    "окт": 10,
+    "ноя": 11,
+    "дек": 12,
+}
+
 def _process_month_columns(
     df: pd.DataFrame,
-    *_,            
-    drop_source_cols: bool = True,
+    *_,            # примем лишние позиционные аргументы, чтобы не падало
+    drop_source_cols: bool = True,  # совместимость со старым вызовом; можно не передавать
 ) -> pd.DataFrame:
     """
     Сформировать колонку sales_month (INT 1-12) из:
@@ -112,15 +199,15 @@ def _process_month_columns(
     return df
 
 
+
+# ------------------------------------------------------------------ #
+# Numeric cleaning                                                      #
+# ------------------------------------------------------------------ #
 def _clean_numeric_series(s: pd.Series, multiply: float | None = None) -> pd.Series:
-    """Очистка числовых значений (запятые, пробелы, мусор), с опциональным умножением."""
-    # работаем в строках, но сохраняем NaN
+    """Clean numeric strings (comma decimals, spaces, junk)."""
     s = s.astype("string")
-    # заменяем запятую на точку (десятичный разделитель)
-    s = s.str.replace(",", ".", regex=False)
-    # оставляем цифры, точку, знак, экспоненту
-    s = s.str.replace(r"[^\d.eE+\-]", "", regex=True)
-    # пустые -> 0
+    s = s.str.replace(",", ".", regex=False)  # decimal comma -> dot
+    s = s.str.replace(r"[^\d.eE+\-]", "", regex=True)  # strip junk
     s = s.fillna("0")
     s = s.replace("", "0")
     out = pd.to_numeric(s, errors="coerce").fillna(0.0)
@@ -130,7 +217,7 @@ def _clean_numeric_series(s: pd.Series, multiply: float | None = None) -> pd.Ser
 
 
 def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Конвертируем числовые колонки исходного формата (raw)."""
+    """Convert expected numeric raw columns to numeric."""
     logger.info("Original columns: %s", df.columns.tolist())
 
     if "sales_units" in df.columns:
@@ -138,8 +225,7 @@ def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "sales_rub" in df.columns:
         df["sales_rub"] = _clean_numeric_series(df["sales_rub"])
     if "sales_tonnes" in df.columns:
-        # тонны -> кг
-        df["sales_tonnes"] = _clean_numeric_series(df["sales_tonnes"], multiply=1000.0)
+        df["sales_tonnes"] = _clean_numeric_series(df["sales_tonnes"], multiply=1000.0)  # tons->kg
     if "cost_rub" in df.columns:
         df["cost_rub"] = _clean_numeric_series(df["cost_rub"])
 
@@ -147,47 +233,44 @@ def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ------------------------------------------------------------------ #
+# String conversion to stage names                                      #
+# ------------------------------------------------------------------ #
 def _convert_string_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Конвертируем строковые RU-колонки в EN-названия с обрезкой и очисткой.
-    Числовые RU-колонки не трогаем (они переименуются позже через sanitize).
-    """
+    """Convert string columns from normalized raw names to stage names."""
     df.columns = [col.strip() for col in df.columns]
 
-    for ru_col, en_col in ColumnConfig.RENAME_MAP.items():
-        if ru_col not in df.columns:
+    for raw_col, stage_col in ColumnConfig.RENAME_MAP.items():
+        if raw_col not in df.columns:
+            continue
+        if stage_col in ColumnConfig.NUMERIC_COLS:
+            # numeric handled elsewhere
             continue
 
-        # пропускаем числовые целевые колонки — их обработали отдельно
-        if en_col in ColumnConfig.NUMERIC_COLS:
-            continue
-
-        max_len = ColumnConfig.STRING_COL_LENGTHS.get(en_col, 255)
-
+        max_len = ColumnConfig.STRING_COL_LENGTHS.get(stage_col, 255)
         try:
-            ser = df[ru_col].astype("string")  # pandas StringDtype
+            ser = df[raw_col].astype("string")
             ser = ser.str.normalize("NFKC")
             ser = ser.str.replace(r"[\x00-\x1F\x7F-\x9F]", "", regex=True)
-            ser = ser.str.strip()
-            ser = ser.fillna("")
+            ser = ser.str.strip().fillna("")
             ser = ser.str.slice(0, max_len)
-            df[en_col] = ser
-
-            if ru_col != en_col:
-                df.drop(columns=[ru_col], inplace=True)
-
-            too_long_mask = df[en_col].astype(str).str.len() > max_len
-            if too_long_mask.any():
-                logger.warning("Some values in %s exceed max length %s after truncation", en_col, max_len)
+            df[stage_col] = ser
+            if raw_col != stage_col:
+                df.drop(columns=[raw_col], inplace=True)
+            if df[stage_col].astype(str).str.len().gt(max_len).any():
+                logger.warning("Some values in %s exceed max length %s after truncation", stage_col, max_len)
         except Exception as e:  # noqa: BLE001
-            logger.error("Error converting string column %s: %s", ru_col, e)
+            logger.error("Error converting string column %s: %s", raw_col, e)
             raise
 
     return df
 
 
+# ------------------------------------------------------------------ #
+# Stage column name sanitizer                                           #
+# ------------------------------------------------------------------ #
 def _sanitize_column_name(name: str) -> str:
-    """Normalize column names to stage naming."""
+    """Normalize column names to final stage naming."""
     if not name or not isinstance(name, str):
         return "unknown_column_0"
 
@@ -228,23 +311,22 @@ def _sanitize_column_name(name: str) -> str:
 
 
 # ------------------------------------------------------------------ #
-# Stage DDL                                                          #
+# Stage DDL                                                             #
 # ------------------------------------------------------------------ #
 def _create_stage_table(
     conn: engine.Connection,
     table_name: str,
     df: pd.DataFrame,
-    schema: str = "pyaterochka",
-    drop_if_exists: bool = False,  # <<< опционально жёстко пересоздаём
+    schema: str = "okey",
+    drop_if_exists: bool = False,
 ) -> None:
-    """Создаём или (опционально) пересоздаём stage-таблицу под DataFrame."""
+    """Create (or optionally drop+recreate) stage table to match DataFrame."""
 
     if drop_if_exists:
         drop_sql = f"IF OBJECT_ID(N'[{schema}].[{table_name}]', 'U') IS NOT NULL DROP TABLE [{schema}].[{table_name}];"
         conn.execute(text(drop_sql))
         logger.info("Dropped existing table [%s].[%s].", schema, table_name)
 
-    # есть ли таблица
     table_exists = (
         conn.execute(
             text(
@@ -257,7 +339,6 @@ def _create_stage_table(
         > 0
     )
 
-    # определить типы колонок
     safe_columns = []
     logger.info("DF columns before stage load: %s", df.columns.tolist())
     logger.info("Max string lengths by column ->")
@@ -272,7 +353,7 @@ def _create_stage_table(
         else:
             max_len = ColumnConfig.STRING_COL_LENGTHS.get(col, 255)
             col_type = f"NVARCHAR({max_len})"
-            max_val_len = int(df[col].astype(str).str.len().max())
+            max_val_len = int(df[col].astype(str).str.len().max()) if col in df.columns else 0
             logger.info("  %s: data_max=%s -> using %s", col, max_val_len, col_type)
         safe_columns.append((col, col_type))
 
@@ -280,7 +361,6 @@ def _create_stage_table(
         raise ValueError("No valid columns to create table")
 
     if not table_exists:
-        # создать новую
         columns_sql = ",\n".join([f"[{col}] {col_type}" for col, col_type in safe_columns])
         create_table_sql = f"""
             CREATE TABLE [{schema}].[{table_name}] (
@@ -295,7 +375,6 @@ def _create_stage_table(
             logger.error("Error creating table: %s\nSQL:\n%s", e, create_table_sql)
             raise
     else:
-        # синхронизируем схему
         for col, col_type in safe_columns:
             try:
                 col_exists = (
@@ -323,43 +402,34 @@ def _create_stage_table(
 
 
 # ------------------------------------------------------------------ #
-# Insert                                                             #
+# Insert                                                                #
 # ------------------------------------------------------------------ #
 def _bulk_insert_data(
     conn: engine.Connection,
     table_name: str,
     df: pd.DataFrame,
-    schema: str = "pyaterochka",
-    debug_fallback: bool = True,  # <<< включаем построчный fallback при ошибке
+    schema: str = "okey",
+    debug_fallback: bool = True,
 ) -> None:
-    """Вставляем данные (однократно) в stage-таблицу."""
-
+    """Bulk insert data once table is ready."""
     if df.empty:
         logger.warning("Empty DataFrame, skipping insert.")
         return
 
-    # столбцы в нужном порядке
     safe_columns = [_sanitize_column_name(col) for col in df.columns if col]
     if not safe_columns:
         raise ValueError("No valid columns for insertion")
 
-    # если таблицы нет (на всякий случай) -> 0
     try:
-        row_count_result = conn.execute(
-            text(f"SELECT COUNT(*) FROM [{schema}].[{table_name}]")
-        )
+        row_count_result = conn.execute(text(f"SELECT COUNT(*) FROM [{schema}].[{table_name}]"))
         row_count = row_count_result.scalar()
-    except exc.DBAPIError:
+    except exc.DBAPIError:  # table may not exist yet
         row_count = 0
 
     if row_count > 0:
-        logger.info(
-            "Table [%s].[%s] already contains data (%s rows), skipping insert.",
-            schema, table_name, row_count,
-        )
+        logger.info("Table [%s].[%s] already contains data (%s rows), skipping insert.", schema, table_name, row_count)
         return
 
-    # подготовка данных
     data = []
     for row in df.itertuples(index=False):
         processed_row = []
@@ -376,10 +446,7 @@ def _bulk_insert_data(
                     processed_val = None
             else:
                 max_len = ColumnConfig.STRING_COL_LENGTHS.get(col, 255)
-                if pd.isna(val):
-                    processed_val = ""
-                else:
-                    processed_val = str(val)[:max_len]
+                processed_val = "" if pd.isna(val) else str(val)[:max_len]
             processed_row.append(processed_val)
         data.append(tuple(processed_row))
 
@@ -398,7 +465,6 @@ def _bulk_insert_data(
     except Exception as e:  # noqa: BLE001
         raw_conn.rollback()
         logger.error("Bulk insert failed: %s\nSQL: %s", e, insert_sql)
-
         if debug_fallback:
             logger.error("Falling back to row-wise debug insert to isolate bad row...")
             for i, row_data in enumerate(data):
@@ -416,25 +482,23 @@ def _bulk_insert_data(
 
 
 # ------------------------------------------------------------------ #
-# Main                                                               #
+# Main                                                                 #
 # ------------------------------------------------------------------ #
 def convert_raw_to_stage(
     table_name: str,
     raw_engine: engine.Engine,
     stage_engine: engine.Engine,
-    stage_schema: str = "pyaterochka",
+    stage_schema: str = "okey",
     limit: int | None = None,
-    drop_stage_if_exists: bool = False,  # <<< удобно когда нет таблицы / хотим пересоздать
+    drop_stage_if_exists: bool = False,
 ) -> None:
-    """
-    Конвертируем данные из raw.<table_name> в stage.<schema>.<table_name> (Pyaterochka).
-    """
+    """Convert data from raw.<table_name> to stage.<schema>.<table_name> for Okey."""
 
     try:
         start_time = datetime.now()
         logger.info("[Stage] Starting processing of table %s", table_name)
 
-        # --- метаданные raw
+        # --- grab metadata from raw
         with raw_engine.connect() as conn:
             try:
                 result = conn.execute(
@@ -447,33 +511,26 @@ def convert_raw_to_stage(
                 actual_columns = [row[0] for row in result]
                 logger.info("Actual columns in raw table: %s", actual_columns)
 
-                total_count = conn.execute(
-                    text(f"SELECT COUNT(*) FROM raw.{table_name}")
-                ).scalar()
+                total_count = conn.execute(text(f"SELECT COUNT(*) FROM raw.{table_name}")).scalar()
                 logger.info("[Stage] Total rows to process: %s", total_count)
             except Exception as e:  # noqa: BLE001
                 logger.error("Error getting table metadata: %s", e)
                 raise
 
-        # --- читаем данные чанками
+        # --- read data in chunks
         chunks: List[pd.DataFrame] = []
         query = f"SELECT * FROM raw.{table_name}"
         if limit is not None:
-            # ORDER BY (SELECT NULL) -> репродуцируем случайный? безопасный порядок
             query += f" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
 
         with raw_engine.connect().execution_options(stream_results=True) as conn:
             try:
-                for chunk in pd.read_sql(
-                    text(query),
-                    conn,
-                    chunksize=100000,
-                    dtype="object",
-                ):
+                for chunk in pd.read_sql(text(query), conn, chunksize=100000, dtype="object"):
                     chunk.columns = [col.strip() for col in chunk.columns]
                     logger.info("Processing chunk with %s rows", len(chunk))
 
                     try:
+                        chunk = _normalize_okey_input_columns(chunk)
                         chunk = _process_month_columns(chunk)
                         chunk = _convert_numeric_columns(chunk)
                         chunk = _convert_string_columns(chunk)
@@ -484,11 +541,8 @@ def convert_raw_to_stage(
 
                     processed_count = sum(len(c) for c in chunks)
                     logger.info(
-                        "[Stage] Processed %s/%s rows",
-                        processed_count,
-                        limit if limit is not None else total_count,
+                        "[Stage] Processed %s/%s rows", processed_count, limit if limit is not None else total_count
                     )
-
                     if limit is not None and processed_count >= limit:
                         break
             except Exception as e:  # noqa: BLE001
@@ -500,16 +554,11 @@ def convert_raw_to_stage(
             return
 
         df = pd.concat(chunks, ignore_index=True)
-
         if limit is not None:
             df = df.head(limit)
 
-        # дроп технические неизвестные
-        columns_to_drop = [
-            col
-            for col in df.columns
-            if col.startswith("none_") or col.startswith("unknown_column_")
-        ]
+        # drop technical/unknown columns if any slipped through
+        columns_to_drop = [c for c in df.columns if c.startswith("none_") or c.startswith("unknown_column_")]
         df = df.drop(columns=columns_to_drop, errors="ignore")
 
         logger.info("Final DataFrame shape after dropping unused columns: %s", df.shape)
@@ -517,28 +566,18 @@ def convert_raw_to_stage(
         if df.empty or len(df.columns) == 0:
             raise ValueError("DataFrame contains no data or columns after processing.")
 
-        # нормализуем имена для stage
+        # sanitize to final stage names (idempotent)
         df.columns = [_sanitize_column_name(col) for col in df.columns]
 
-        # --- загрузка в stage
+        # --- load to stage
         with stage_engine.connect() as conn:
             trans = conn.begin()
             try:
-                _create_stage_table(
-                    conn,
-                    table_name,
-                    df,
-                    schema=stage_schema,
-                    drop_if_exists=drop_stage_if_exists,
-                )
+                _create_stage_table(conn, table_name, df, schema=stage_schema, drop_if_exists=drop_stage_if_exists)
                 _bulk_insert_data(conn, table_name, df, schema=stage_schema, debug_fallback=True)
                 trans.commit()
                 duration = (datetime.now() - start_time).total_seconds()
-                logger.info(
-                    "[Stage] Successfully loaded %s rows in %.2f sec",
-                    len(df),
-                    duration,
-                )
+                logger.info("[Stage] Successfully loaded %s rows in %.2f sec", len(df), duration)
             except Exception as e:  # noqa: BLE001
                 trans.rollback()
                 logger.error("Error loading to stage: %s", e)
