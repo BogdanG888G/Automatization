@@ -384,7 +384,7 @@ def archive_x5_file(file_path: str):
 with DAG(
     dag_id="x5_sales_data_pipeline",
     start_date=datetime(2025, 7, 15),
-    schedule_interval="0 9 * * *",
+    schedule_interval=None,
     catchup=False,
     max_active_runs=1,
     tags=["x5", "sales", "data"],
