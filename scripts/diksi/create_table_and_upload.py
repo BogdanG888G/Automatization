@@ -43,10 +43,28 @@ class TableProcessorDiksi:
     @staticmethod
     def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Нормализует названия столбцов: переводит в нижний регистр, заменяет пробелы на "_".
+        Нормализует названия столбцов: делает уникальными, заменяет пробелы на "_", переводит в нижний регистр.
         """
-        df.columns = [re.sub(r'\s+', '_', str(col).strip().lower()) for col in df.columns]
+        new_cols = []
+        seen = {}
+
+        for col in df.columns:
+            # Базовое имя
+            base_name = re.sub(r'\s+', '_', str(col).strip().lower())
+
+            # Если дубликат, добавляем счетчик
+            if base_name in seen:
+                seen[base_name] += 1
+                new_name = f"{base_name}_{seen[base_name]}"
+            else:
+                seen[base_name] = 0
+                new_name = base_name
+
+            new_cols.append(new_name)
+
+        df.columns = new_cols
         return df
+
 
     @classmethod
     def _safe_read_csv(cls, file_path: str) -> pd.DataFrame:
