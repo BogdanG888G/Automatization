@@ -310,13 +310,11 @@ def process_magnit_file(file_path: str):
         raise
 
 def archive_empty_file(file_path: str, empty: bool = False, error: bool = False):
-    """Archive file with appropriate suffix"""
+    """Archive file without changing its name or extension"""
     os.makedirs(MagnitConfig.ARCHIVE_DIR, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(file_path))[0]
-    ext = os.path.splitext(file_path)[1]
     
-    archive_name = f"{base_name}"
-    archive_path = os.path.join(MagnitConfig.ARCHIVE_DIR, archive_name)
+    file_name = os.path.basename(file_path)  # Имя файла с расширением
+    archive_path = os.path.join(MagnitConfig.ARCHIVE_DIR, file_name)
     
     try:
         shutil.move(file_path, archive_path)
@@ -324,6 +322,7 @@ def archive_empty_file(file_path: str, empty: bool = False, error: bool = False)
     except Exception as e:
         logging.error(f"Failed to archive file {file_path}: {str(e)}")
 
+        
 default_args = {
     'owner': 'airflow',
     'retries': 2,
