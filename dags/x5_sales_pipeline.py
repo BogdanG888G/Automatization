@@ -7,165 +7,400 @@ import os
 import shutil
 import logging
 from sqlalchemy import create_engine, exc
-from typing import List
+import pandas as pd
+from typing import List, Optional
+from airflow.utils.task_group import TaskGroup
+import chardet
+import pyxlsb
 
-# Optimized logging configuration
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
-# Configuration constants
-class Config:
+# ----------------------------------- #
+# DB connection strings for X5         #
+# ----------------------------------- #
+DEFAULT_CONN_TEST = (
+    "mssql+pyodbc://airflow_agent:123@host.docker.internal/Test"
+    "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+)
+DEFAULT_CONN_STAGE = (
+    "mssql+pyodbc://airflow_agent:123@host.docker.internal/Stage"
+    "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+)
+
+
+# ----------------------------------- #
+# Config                              #
+# ----------------------------------- #
+class X5Config:
+    MAX_CONCURRENT_TASKS = 4
+    MAX_FILES_PER_RUN = 8
+    TASK_TIMEOUT = timedelta(minutes=45)
+    MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
+
     DATA_DIR = "/opt/airflow/data"
     ARCHIVE_DIR = "/opt/airflow/archive"
     ALLOWED_EXT = {'.csv', '.xlsx', '.xls', '.xlsb'}
-    FILE_PREFIX = "x5_"
-    STAGE_SCHEMA = "x5"
-    
-    # Connection pool settings
+    FILE_PREFIXES = ("x5", "x5retail")  # Можно добавить вариации
+    STAGE_SCHEMA = "x5"  # Имя схемы для X5
+
+    @staticmethod
+    def get_processing_pool():
+        try:
+            pools = Variable.get("airflow_pools", default_var="default_pool")
+            return "x5_file_pool" if "x5_file_pool" in pools.split(",") else "default_pool"
+        except Exception:
+            return "default_pool"
+
+    PROCESSING_POOL = get_processing_pool()
+    POOL_SLOTS = 6
+
     CONN_SETTINGS = {
-        'pool_size': 5,
-        'max_overflow': 2,
+        'pool_size': 2,
+        'max_overflow': 3,
         'pool_timeout': 30,
-        'pool_recycle': 3600
+        'pool_recycle': 3600,
+        'connect_args': {
+            'timeout': 900,
+            'application_name': 'airflow_x5_loader'
+        }
     }
 
-    DEFAULT_CONN_TEST = (
-        "mssql+pyodbc://airflow_agent:123@host.docker.internal/Test"
-        "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
-    )
-    DEFAULT_CONN_STAGE = (
-        "mssql+pyodbc://airflow_agent:123@host.docker.internal/Stage"
-        "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
-    )
 
-# Engine cache for better performance
+# ----------------------------------- #
+# Engine cache                       #
+# ----------------------------------- #
 _engine_cache = {}
+_last_cache_update = datetime.min
+
 
 def get_engine(db_type: str):
-    """Optimized engine creation with caching."""
-    if db_type in _engine_cache:
-        return _engine_cache[db_type]
-    
-    try:
-        conn_str = Variable.get(f"MSSQL_CONN_STR_{db_type.upper()}",
-                              default_var=getattr(Config, f"DEFAULT_CONN_{db_type.upper()}"))
-        
-        engine = create_engine(conn_str, **Config.CONN_SETTINGS)
-        _engine_cache[db_type] = engine
-        return engine
-    except Exception as e:
-        logger.error(f"Engine creation error for {db_type}: {str(e)}")
-        raise
+    global _last_cache_update
 
-@task(
-    task_id="scan_files",
-    retries=2,
-    retry_delay=timedelta(minutes=1),
-    execution_timeout=timedelta(minutes=5)
-)
-def scan_files() -> List[str]:
-    """Optimized file scanning with error handling."""
-    try:
-        x5_files = [
-            os.path.join(root, f)
-            for root, _, files in os.walk(Config.DATA_DIR)
-            for f in files
-            if f.lower().startswith(Config.FILE_PREFIX) 
-            and os.path.splitext(f)[1].lower() in Config.ALLOWED_EXT
-        ]
-        
-        logger.info(f"Found {len(x5_files)} X5 files to process")
-        return x5_files
-        
-    except Exception as e:
-        logger.error(f"File scanning error: {str(e)}")
-        raise
+    if (datetime.now() - _last_cache_update) > timedelta(hours=6):
+        _engine_cache.clear()
+        _last_cache_update = datetime.now()
 
-@task(
-    task_id="process_file",
-    retries=3,
-    retry_delay=timedelta(minutes=5),
-    execution_timeout=timedelta(hours=1),
-    pool="file_processing_pool"
-)
-def process_file(file_path: str):
-    """Optimized file processing with resource management."""
-    try:
-        logger.info(f"Starting processing: {file_path}")
-        
-        # 1. Convert to CSV if needed
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext in {'.xlsx', '.xls', '.xlsb'}:
-            from common.convert_xlsx_to_csv import convert_excel_to_csv
-            file_path = convert_excel_to_csv(file_path)
-            logger.info(f"Converted to CSV: {file_path}")
-
-        # 2. Load to raw
+    if db_type not in _engine_cache:
         try:
-            from x5.create_table_and_upload import create_table_and_upload
-            engine_test = get_engine('test')
-            table_name = create_table_and_upload(file_path, engine=engine_test)
-            logger.info(f"Data loaded to raw.{table_name}")
-        except exc.SQLAlchemyError as db_error:
-            logger.error(f"DB error loading to raw: {str(db_error)}")
+            if db_type.lower() == "test":
+                conn_str = DEFAULT_CONN_TEST
+            elif db_type.lower() == "stage":
+                conn_str = DEFAULT_CONN_STAGE
+            else:
+                raise ValueError(f"Unknown DB type: {db_type}")
+
+            _engine_cache[db_type] = create_engine(conn_str, **X5Config.CONN_SETTINGS)
+        except Exception as e:
+            logging.error(f"Error creating engine for {db_type}: {str(e)}")
             raise
 
-        # 3. Convert to stage
+    return _engine_cache[db_type]
+
+
+# ----------------------------------- #
+# File helpers                       #
+# ----------------------------------- #
+def detect_file_encoding(file_path: str) -> str:
+    with open(file_path, 'rb') as f:
+        raw_data = f.read(10000)
+        result = chardet.detect(raw_data)
+        return result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
+
+
+def preprocess_x5_file(file_path: str) -> str:
+    if file_path.endswith('.xlsb'):
+        return file_path
+
+    temp_path = file_path + ".processed"
+    encoding = detect_file_encoding(file_path)
+
+    try:
+        with open(file_path, 'r', encoding=encoding) as infile, \
+             open(temp_path, 'w', encoding='utf-8') as outfile:
+
+            for line in infile:
+                line = line.replace('\x00', '').replace('"', '').strip()
+                if not line:
+                    continue
+
+                if file_path.endswith('.csv'):
+                    parts = line.split(';')
+                    if len(parts) > 1:
+                        parts = [
+                            p.replace(',', '.') if p.replace(',', '').replace('.', '').isdigit() else p
+                            for p in parts
+                        ]
+                        line = ';'.join(parts)
+
+                outfile.write(line + '\n')
+
+        return temp_path
+    except Exception as e:
+        logging.error(f"File preprocessing error: {str(e)}")
+        return file_path
+
+HEADER_CANDIDATES_X5 = (
+    "сеть", "филиал", "регион", "город", "адрес",
+    "тов.иер", "материал", "количество", "оборот", "средняя", "поставщик"
+)
+
+def _detect_header_row_x5(file_path: str, encoding: str = "utf-8", max_scan: int = 10) -> int:
+    """
+    Возвращает индекс строки (0-based), которую стоит использовать как header при чтении CSV X5.
+    Если ничего подходящего не нашли — вернём 0.
+    """
+    try:
+        with open(file_path, "r", encoding=encoding, errors="replace") as f:
+            for idx in range(max_scan):
+                line = f.readline()
+                if not line:  # EOF
+                    break
+                low = line.lower()
+                hit_count = sum(tok in low for tok in HEADER_CANDIDATES_X5)
+                if hit_count >= 2:
+                    return idx
+    except Exception:
+        pass
+    return 0
+
+
+
+def read_x5_file(file_path: str, max_rows: Optional[int] = None, skip_first_row: bool = False) -> Optional[pd.DataFrame]:
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    skiprows = 1 if skip_first_row else 0
+
+    if file_path.endswith('.xlsb'):
+        try:
+            with pyxlsb.open_workbook(file_path) as wb:
+                first_sheet = wb.sheets[0] if wb.sheets else None
+                if first_sheet is None:
+                    logging.error(f"No sheets in XLSB: {file_path}")
+                    return None
+                with wb.get_sheet(first_sheet) as sheet:
+                    data = []
+                    for i, row in enumerate(sheet.rows()):
+                        if max_rows is not None and i >= max_rows + skiprows:
+                            break
+                        data.append([item.v for item in row])
+                    if not data:
+                        return None
+                    # Пропускаем первую строку, если надо
+                    data = data[skiprows:]
+                    if not data:
+                        return None
+                    cols = [str(c) if c is not None else f"col_{idx}" for idx, c in enumerate(data[0])]
+                    df = pd.DataFrame(data[1:], columns=cols)
+                    return df
+        except Exception as e:
+            logging.error(f"Failed to read XLSB file: {str(e)}")
+            return None
+
+    encoding = detect_file_encoding(file_path)
+
+    try:
+        if file_path.endswith('.csv'):
+            hdr_idx = _detect_header_row_x5(file_path, encoding=encoding)
+            df = pd.read_csv(
+                file_path,
+                delimiter=';',
+                decimal='.',
+                thousands=' ',
+                encoding=encoding,
+                header=hdr_idx,
+                nrows=max_rows,
+            )
+            return df
+        else:
+            return pd.read_excel(
+                file_path,
+                engine='openpyxl',
+                nrows=max_rows,
+                header=0,   # Excel обычно чистый
+            )
+    except Exception as e:
+        logging.warning(f"Standard read failed, trying fallbacks: {str(e)}")
+
+    # --- CSV fallbacks ---
+    if file_path.endswith('.csv'):
+        hdr_idx = _detect_header_row_x5(file_path, encoding=encoding)
+        strategies = [
+            {'sep': ';', 'decimal': '.', 'thousands': ' ', 'encoding': encoding, 'header': hdr_idx},
+            {'engine': 'python', 'encoding': encoding, 'header': hdr_idx},
+            {'encoding': 'cp1251', 'header': hdr_idx},
+            {'encoding': 'latin1', 'header': hdr_idx},
+        ]
+        for strategy in strategies:
+            try:
+                return pd.read_csv(file_path, **strategy)
+            except Exception:
+                continue
+
+    processed_path = preprocess_x5_file(file_path)
+    try:
+        if processed_path.endswith('.csv'):
+            hdr_idx = _detect_header_row_x5(processed_path, encoding='utf-8')
+            return pd.read_csv(processed_path, delimiter=';', decimal='.', thousands=' ', header=hdr_idx)
+        else:
+            return pd.read_excel(processed_path, engine='openpyxl', header=0)
+    finally:
+        if processed_path != file_path and os.path.exists(processed_path):
+            os.remove(processed_path)
+
+    return None
+
+
+
+# ----------------------------------- #
+# Scan task                         #
+# ----------------------------------- #
+@task(
+    task_id="scan_x5_files",
+    retries=2,
+    retry_delay=timedelta(minutes=1),
+    execution_timeout=X5Config.TASK_TIMEOUT,
+    pool=X5Config.PROCESSING_POOL,
+    pool_slots=1,
+)
+def scan_x5_files() -> List[str]:
+    try:
+        valid_files = []
+        total_size = 0
+
+        logging.info(f"[X5] Scanning directory: {X5Config.DATA_DIR}")
+        if not os.path.exists(X5Config.DATA_DIR):
+            raise FileNotFoundError(f"Directory not found: {X5Config.DATA_DIR}")
+
+        for root, _, files in os.walk(X5Config.DATA_DIR):
+            for f in files:
+                ext_ok = os.path.splitext(f)[1].lower() in X5Config.ALLOWED_EXT
+                name_ok = any(tok in f.lower() for tok in X5Config.FILE_PREFIXES)
+                if not (ext_ok and name_ok):
+                    continue
+
+                file_path = os.path.join(root, f)
+                file_size = os.path.getsize(file_path)
+
+                if file_size == 0:
+                    logging.warning(f"[X5] Skipping empty file: {file_path}")
+                    continue
+
+                if total_size + file_size > X5Config.MAX_FILE_SIZE:
+                    logging.warning(f"[X5] File size limit exceeded. Skipping {file_path}")
+                    continue
+
+                valid_files.append(file_path)
+                total_size += file_size
+
+                if len(valid_files) >= X5Config.MAX_FILES_PER_RUN:
+                    break
+
+            if len(valid_files) >= X5Config.MAX_FILES_PER_RUN:
+                break
+
+        logging.info(f"[X5] Found {len(valid_files)} X5 files (total size: {total_size / 1024 / 1024:.2f} MB)")
+        return valid_files[:X5Config.MAX_FILES_PER_RUN]
+
+    except Exception as e:
+        logging.error(f"[X5] File scanning error: {str(e)}", exc_info=True)
+        raise
+
+
+# ----------------------------------- #
+# Process single file                 #
+# ----------------------------------- #
+@task(
+    task_id="process_x5_file",
+    retries=3,
+    retry_delay=timedelta(minutes=5),
+    execution_timeout=X5Config.TASK_TIMEOUT,
+    pool=X5Config.PROCESSING_POOL,
+    pool_slots=1,
+)
+def process_x5_file(file_path: str):
+    try:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        if os.path.getsize(file_path) == 0:
+            logging.warning(f"[X5] Skipping empty file: {file_path}")
+            archive_x5_file(file_path, empty=True)
+            return
+
+        df = read_x5_file(file_path, max_rows=10000)
+        if df is None or df.empty:
+            logging.error(f"[X5] Failed to read data from file: {file_path}")
+            archive_x5_file(file_path)
+            return
+
+        engine_test = get_engine('test')
+        try:
+            from x5.create_table_and_upload import create_x5_table_and_upload
+            table_name = create_x5_table_and_upload(file_path, engine=engine_test)
+            logging.info(f"[X5] Data loaded to raw.{table_name}")
+        except exc.SQLAlchemyError as e:
+            engine_test.dispose()
+            logging.error(f"[X5] Raw load error: {str(e)}")
+            archive_x5_file(file_path)
+            raise RuntimeError(f"Raw load error: {str(e)}")
+
+        engine_stage = get_engine('stage')
         try:
             from x5.convert_raw_to_stage import convert_raw_to_stage
-            engine_stage = get_engine('stage')
             convert_raw_to_stage(
                 table_name=table_name,
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
-                stage_schema=Config.STAGE_SCHEMA
+                stage_schema=X5Config.STAGE_SCHEMA,
+                limit=10000,
             )
-            logger.info(f"Data loaded to {Config.STAGE_SCHEMA}.{table_name}")
-        except exc.SQLAlchemyError as db_error:
-            logger.error(f"DB error loading to stage: {str(db_error)}")
-            raise
+            logging.info("[X5] Data loaded to stage.")
+        except exc.SQLAlchemyError as e:
+            engine_stage.dispose()
+            logging.error(f"[X5] Stage load error: {str(e)}")
+            archive_x5_file(file_path)
+            raise RuntimeError(f"Stage load error: {str(e)}")
 
-        # 4. Archive with checks
-        try:
-            os.makedirs(Config.ARCHIVE_DIR, exist_ok=True)
-            shutil.move(file_path, os.path.join(Config.ARCHIVE_DIR, os.path.basename(file_path)))
-            logger.info(f"File archived: {file_path}")
-        except OSError as file_error:
-            logger.error(f"Archiving error: {str(file_error)}")
-            raise
+        archive_x5_file(file_path)
 
     except Exception as e:
-        logger.error(f"Critical error processing {file_path}: {str(e)}", exc_info=True)
-        raise
+        logging.error(f"[X5] Error processing file {file_path}: {str(e)}", exc_info=True)
+        archive_x5_file(file_path)
 
-# DAG configuration with optimized parameters
-default_args = {
-    'owner': 'airflow',
-    'depends_on_past': False,
-    'retries': 2,
-    'retry_delay': timedelta(minutes=5),
-    'execution_timeout': timedelta(hours=2),
-    'max_active_tis_per_dag': 4
-}
+def archive_x5_file(file_path: str):
+    try:
+        base_name = os.path.basename(file_path)
+        archive_path = X5Config.ARCHIVE_DIR  # просто одна папка архива
+        os.makedirs(archive_path, exist_ok=True)
+        dest_path = os.path.join(archive_path, base_name)
+        shutil.move(file_path, dest_path)
+        logging.info(f"[X5] Archived file {file_path} to {dest_path}")
+    except Exception as e:
+        logging.error(f"[X5] Archiving failed for {file_path}: {str(e)}")
 
+# ----------------------------------- #
+# DAG definition                    #
+# ----------------------------------- #
 with DAG(
-    dag_id="x5_sales_pipeline",
-    default_args=default_args,
-    description="ETL pipeline for X5 sales data",
-    start_date=datetime(2025, 7, 7),
-    schedule_interval=None,
+    dag_id="x5_sales_data_pipeline",
+    start_date=datetime(2025, 7, 15),
+    schedule_interval="0 9 * * *",
     catchup=False,
-    tags=["x5", "sales", "retail"],
-    doc_md=__doc__,
-    max_active_tasks=4,
-    concurrency=6,
+    max_active_runs=1,
+    tags=["x5", "sales", "data"],
+    default_args={
+        "owner": "airflow",
+        "depends_on_past": False,
+        "retries": 1,
+        "retry_delay": timedelta(minutes=10),
+    },
 ) as dag:
-
     start = EmptyOperator(task_id="start")
     end = EmptyOperator(task_id="end")
 
-    # Optimized workflow
-    files = scan_files()
-    processed = process_file.expand(file_path=files)
-    
-    start >> files >> processed >> end
+    files = scan_x5_files()
+
+    with TaskGroup("process_x5_files") as process_group:
+        process_tasks = process_x5_file.expand(file_path=files)
+
+    start >> files >> process_group >> end
