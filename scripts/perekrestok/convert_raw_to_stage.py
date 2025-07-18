@@ -291,7 +291,7 @@ def extract_month_year(source: str) -> Tuple[Optional[int], Optional[int]]:
 # ---------------------------------------------------------------------------
 class TableProcessorPerek:
     CHUNKSIZE = 100_000  # not yet used; we load whole sheet then clip
-    BATCH_SIZE = 10_000
+    BATCH_SIZE = 50_000
 
     @classmethod
     def _safe_read_csv(cls, file_path: str) -> pd.DataFrame:

@@ -343,55 +343,28 @@ def _create_stage_table(conn: engine.Connection, table_name: str,
         logger.error(f"Error creating table: {e}\nSQL: {create_table_sql}")
         raise
 
-def _bulk_insert_data(conn: engine.Connection, table_name: str, 
-                     df: pd.DataFrame, schema: str = 'magnit') -> None:
-    """Insert data only if table is empty."""
-    if df.empty:
-        logger.warning("Empty DataFrame, skipping insert")
+def _bulk_insert_chunk(conn: engine.Connection, table_name: str, 
+                      chunk_df: pd.DataFrame, schema: str = 'magnit') -> None:
+    """Быстрая вставка чанка данных"""
+    if chunk_df.empty:
         return
 
-    safe_columns = [_sanitize_column_name(col) for col in df.columns if col]
-    if not safe_columns:
-        raise ValueError("No valid columns for insertion")
-
-    # Check if table already has data
-    row_count_result = conn.execute(
-        text(f"SELECT COUNT(*) FROM [{schema}].[{table_name}]")
-    )
-    row_count = row_count_result.scalar()
-    if row_count > 0:
-        logger.info(f"Table [{schema}].[{table_name}] already contains data ({row_count} rows), skipping insert")
-        return
-
-    # Prepare data with proper handling
-    data = []
-    for row in df.itertuples(index=False):
-        processed_row = []
-        for val, col in zip(row, df.columns):
-            if col in ColumnConfig.NUMERIC_COLS:
-                processed_val = float(val) if pd.notna(val) else 0.0
-            elif 'date' in col or 'month' in col:
-                processed_val = str(val) if pd.notna(val) else None
-            else:
-                processed_val = str(val)[:500] if pd.notna(val) else ''
-            processed_row.append(processed_val)
-        data.append(tuple(processed_row))
-
-    cols = ', '.join([f'[{col}]' for col in safe_columns])
-    params = ', '.join(['?'] * len(safe_columns))
-
+    # Преобразование данных в список кортежей
+    data = [tuple(x) for x in chunk_df.to_numpy()]
+    cols = ', '.join([f'[{col}]' for col in chunk_df.columns])
+    params = ', '.join(['?'] * len(chunk_df.columns))
+    
     raw_conn = conn.connection
     cursor = raw_conn.cursor()
-
+    
     try:
-        cursor.fast_executemany = True
         insert_sql = f"INSERT INTO [{schema}].[{table_name}] ({cols}) VALUES ({params})"
+        cursor.fast_executemany = True
         cursor.executemany(insert_sql, data)
         raw_conn.commit()
-        logger.info(f"Inserted {len(df)} rows into [{schema}].[{table_name}]")
     except Exception as e:
         raw_conn.rollback()
-        logger.error(f"Error inserting data: {e}\nSQL: {insert_sql}")
+        logger.error(f"Error inserting data: {e}")
         raise
     finally:
         cursor.close()
@@ -399,141 +372,101 @@ def _bulk_insert_data(conn: engine.Connection, table_name: str,
 def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine, 
                         stage_engine: engine.Engine, stage_schema: str = 'magnit', 
                         limit: int = None) -> None:
-    """
-    Convert data from raw to stage schema.
-    
-    Args:
-        table_name: Name of the table in raw schema
-        raw_engine: SQLAlchemy engine for raw database
-        stage_engine: SQLAlchemy engine for stage database
-        stage_schema: Name of stage schema (default 'magnit')
-        limit: Row limit for processing
-    """
+    """Оптимизированная конвертация данных из RAW в STAGE"""
     try:
         start_time = datetime.now()
-        logger.info(f"[Stage] Starting processing of table {table_name}")
+        logger.info(f"[Stage] Starting optimized processing for {table_name}")
         
-        # 1. Get actual column names from raw
+        # 1. Получение метаданных
         with raw_engine.connect() as conn:
+            # Проверка существования данных в STAGE
             try:
-                result = conn.execute(text(
-                    f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                    f"WHERE TABLE_SCHEMA = 'raw' AND TABLE_NAME = :table_name"
-                ), {'table_name': table_name})
-                actual_columns = [row[0].lower().replace(' ', '_') for row in result]
-                
-                logger.info(f"Actual columns in raw table: {actual_columns}")
-                
-                total_count = conn.execute(
-                    text(f"SELECT COUNT(*) FROM raw.{table_name}")
-                ).scalar()
-                logger.info(f"[Stage] Total rows to process: {total_count}")
-            except Exception as e:
-                logger.error(f"Error getting table metadata: {e}")
-                raise
-
-        # 2. Read sample data to detect year
-        with raw_engine.connect() as conn:
+                check_sql = f"""
+                    SELECT 1 
+                    FROM {stage_schema}.{table_name} 
+                    TABLESAMPLE (1 ROWS)
+                """
+                if conn.execute(text(check_sql)).scalar():
+                    logger.info(f"Data already exists in {stage_schema}.{table_name}, skipping")
+                    return
+            except:
+                pass
+            
+            # Определение структуры таблицы
+            result = conn.execute(text(
+                f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_SCHEMA = 'raw' AND TABLE_NAME = :table_name"
+            ), {'table_name': table_name})
+            actual_columns = {row[0].lower().replace(' ', '_') for row in result}
+            
+            # Определение года
             sample_df = pd.read_sql(
                 text(f"SELECT TOP 100 * FROM raw.{table_name}"),
                 conn
             )
-        
-        year = _detect_year(sample_df)
-        logger.info(f"Detected data format year: {year}")
-        
-        # 3. Select appropriate rename map
-        rename_map = ColumnConfig.RENAME_MAP_2024 if year == 2024 else ColumnConfig.RENAME_MAP_2025
-        valid_rename_map = {
-            ru: en for ru, en in rename_map.items() 
-            if ru in actual_columns
-        }
-        logger.info(f"Active RENAME_MAP: {valid_rename_map}")
+            year = _detect_year(sample_df)
+            rename_map = ColumnConfig.RENAME_MAP_2024 if year == 2024 else ColumnConfig.RENAME_MAP_2025
+            active_rename_map = {k: v for k, v in rename_map.items() if k in actual_columns}
+            
+            # Определение ожидаемых колонок
+            expected_columns = (
+                set(active_rename_map.values()) | 
+                set(ColumnConfig.NUMERIC_COLS.keys())
+            )
+            
+            # Создание таблицы в STAGE
+            with stage_engine.connect() as stage_conn:
+                _create_stage_table(stage_conn, table_name, expected_columns, stage_schema)
 
-        # 4. Read data with chunking
-        chunks: List[pd.DataFrame] = []
+        # 2. Потоковая обработка данных
         query = f"SELECT * FROM raw.{table_name}"
-        if limit is not None:
+        if limit:
             query += f" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
         
+        processed_rows = 0
+        chunk_size = 50000  # Оптимальный размер чанка для fast_executemany
+        
         with raw_engine.connect().execution_options(stream_results=True) as conn:
-            try:
-                for chunk in pd.read_sql(
-                    text(query),
-                    conn,
-                    chunksize=100000,
-                    dtype='object'
-                ):
-                    chunk.columns = [col.lower().replace(' ', '_') for col in chunk.columns]
-                    logger.info(f"Processing chunk with {len(chunk)} rows")
-                    
-                    try:
-                        # Apply year-specific processing
-                        if year == 2024:
-                            chunk = _process_2024_data(chunk)
+            for chunk in pd.read_sql(
+                text(query), 
+                conn, 
+                chunksize=chunk_size
+            ):
+                # Нормализация колонок
+                chunk.columns = [col.lower().replace(' ', '_') for col in chunk.columns]
+                
+                # Обработка данных
+                if year == 2024:
+                    chunk = _process_2024_data(chunk)
+                else:
+                    chunk = _process_2025_data(chunk)
+                
+                chunk = _convert_numeric_columns(chunk, year)
+                chunk = _convert_string_columns(chunk, active_rename_map)
+                
+                # Добавление отсутствующих колонок
+                for col in expected_columns:
+                    if col not in chunk.columns:
+                        if col in ColumnConfig.NUMERIC_COLS:
+                            chunk[col] = ColumnConfig.NUMERIC_COLS[col]['default']
                         else:
-                            chunk = _process_2025_data(chunk)
-                            
-                        chunk = _convert_numeric_columns(chunk, year)
-                        chunk = _convert_string_columns(chunk, year)
-                        chunks.append(chunk)
-                    except Exception as e:
-                        logger.error(f"Error processing chunk: {e}")
-                        raise
-                    
-                    processed_count = sum(len(c) for c in chunks)
-                    logger.info(f"[Stage] Processed {processed_count}/{limit if limit is not None else total_count} rows")
-                    
-                    if limit is not None and processed_count >= limit:
-                        break
-            except Exception as e:
-                logger.error(f"Error reading data: {e}")
-                raise
-
-        if not chunks:
-            logger.warning("[Stage] No data to process")
-            return
-
-        # 5. Combine chunks
-        df = pd.concat(chunks, ignore_index=True)
-        if limit is not None:
-            df = df.head(limit)
-            
-        # Remove unused columns
-        columns_to_drop = [col for col in df.columns 
-                         if col.startswith('none_') or 
-                         col.startswith('unknown_column_')]
-        df = df.drop(columns=columns_to_drop, errors='ignore')
-        
-        logger.info(f"Final DataFrame shape after dropping unused columns: {df.shape}")
-
-        del chunks
-        
-        if df.empty or len(df.columns) == 0:
-            raise ValueError("DataFrame contains no data or columns after processing")
-        
-        # 6. Load to stage
-        with stage_engine.connect() as conn:
-            trans = None
-            try:
-                trans = conn.begin()
+                            chunk[col] = ''
                 
-                df.columns = [_sanitize_column_name(col) for col in df.columns]
-                _create_stage_table(conn, table_name, df, stage_schema)
-                _bulk_insert_data(conn, table_name, df, stage_schema)
+                # Вставка данных
+                with stage_engine.connect() as stage_conn:
+                    _bulk_insert_chunk(
+                        stage_conn, 
+                        table_name, 
+                        chunk[list(expected_columns)], 
+                        stage_schema
+                    )
                 
-                trans.commit()
-                
-                duration = (datetime.now() - start_time).total_seconds()
-                logger.info(
-                    f"[Stage] Successfully loaded {len(df)} rows in {duration:.2f} sec"
-                )
-            except Exception as e:
-                if trans:
-                    trans.rollback()
-                logger.error(f"Error loading to stage: {e}")
-                raise
+                processed_rows += len(chunk)
+                logger.info(f"Processed {processed_rows} rows")
+        
+        logger.info(f"[Stage] Finished loading {processed_rows} rows in "
+                   f"{(datetime.now() - start_time).total_seconds():.2f} seconds")
                 
     except Exception as e:
-        logger.error(f"[Stage ERROR] Error processing table {table_name}: {str(e)}")
+        logger.error(f"[Stage ERROR] Processing failed: {str(e)}")
         raise

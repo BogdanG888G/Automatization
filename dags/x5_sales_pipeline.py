@@ -31,10 +31,11 @@ DEFAULT_CONN_STAGE = (
 # Config                              #
 # ----------------------------------- #
 class X5Config:
-    MAX_CONCURRENT_TASKS = 4
+    MAX_CONCURRENT_TASKS = 2
     MAX_FILES_PER_RUN = 8
-    TASK_TIMEOUT = timedelta(minutes=45)
+    TASK_TIMEOUT = timedelta(minutes=120)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
+    POOL_SLOTS = 4  # Сбалансировать с pool_size БД
 
     DATA_DIR = "/opt/airflow/data"
     ARCHIVE_DIR = "/opt/airflow/archive"
@@ -313,53 +314,53 @@ def scan_x5_files() -> List[str]:
     task_id="process_x5_file",
     retries=3,
     retry_delay=timedelta(minutes=5),
-    execution_timeout=X5Config.TASK_TIMEOUT,
+    execution_timeout=timedelta(minutes=120),  # Увеличить таймаут для больших файлов
     pool=X5Config.PROCESSING_POOL,
-    pool_slots=1,
+    pool_slots=2,  # Увеличить слоты для ресурсоемких задач
 )
 def process_x5_file(file_path: str):
     try:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        if os.path.getsize(file_path) == 0:
+        file_size = os.path.getsize(file_path)
+        logging.info(f"Processing file: {file_path} ({file_size/1024/1024:.2f} MB)")
+
+        if file_size == 0:
             logging.warning(f"[X5] Skipping empty file: {file_path}")
             archive_x5_file(file_path, empty=True)
             return
 
-        df = read_x5_file(file_path, max_rows=10000)
-        if df is None or df.empty:
-            logging.error(f"[X5] Failed to read data from file: {file_path}")
-            archive_x5_file(file_path)
-            return
-
+        # Прямая передача файла без чтения в память
         engine_test = get_engine('test')
         try:
             from x5.create_table_and_upload import create_x5_table_and_upload
             table_name = create_x5_table_and_upload(file_path, engine=engine_test)
             logging.info(f"[X5] Data loaded to raw.{table_name}")
         except exc.SQLAlchemyError as e:
-            engine_test.dispose()
             logging.error(f"[X5] Raw load error: {str(e)}")
             archive_x5_file(file_path)
             raise RuntimeError(f"Raw load error: {str(e)}")
 
-        engine_stage = get_engine('stage')
-        try:
+        # Для больших файлов - отложенная обработка в Stage
+        if file_size > 100 * 1024 * 1024:  # >100MB
+            logging.info("Scheduling async stage conversion for large file")
+            from x5.convert_raw_to_stage import schedule_stage_conversion
+            schedule_stage_conversion(
+                table_name=table_name,
+                raw_engine=engine_test,
+                stage_engine=get_engine('stage'),
+                stage_schema=X5Config.STAGE_SCHEMA
+            )
+        else:
+            logging.info("Immediate stage conversion")
             from x5.convert_raw_to_stage import convert_raw_to_stage
             convert_raw_to_stage(
                 table_name=table_name,
                 raw_engine=engine_test,
-                stage_engine=engine_stage,
-                stage_schema=X5Config.STAGE_SCHEMA,
-                limit=10000,
+                stage_engine=get_engine('stage'),
+                stage_schema=X5Config.STAGE_SCHEMA
             )
-            logging.info("[X5] Data loaded to stage.")
-        except exc.SQLAlchemyError as e:
-            engine_stage.dispose()
-            logging.error(f"[X5] Stage load error: {str(e)}")
-            archive_x5_file(file_path)
-            raise RuntimeError(f"Stage load error: {str(e)}")
 
         archive_x5_file(file_path)
 

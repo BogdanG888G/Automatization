@@ -32,7 +32,7 @@ class PerekrestokTableProcessor:
 
     CHUNKSIZE = 100_000
     BATCH_SIZE = 10_000
-    MAX_ROWS = 10_000  # safety cap
+    MAX_ROWS = None  # safety cap
 
     # Month map: full, short, dotted, digit mix, latin translit, common typos
     _MONTH_MAP: Dict[str, int] = {
