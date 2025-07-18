@@ -271,9 +271,72 @@ def read_excel_safely(file_path: str, nrows: Optional[int]) -> Dict[str, pd.Data
 # Main processor                                                     #
 # ------------------------------------------------------------------ #
 class X5TableProcessor:
-    MAX_ROWS = 10_000   # ограничение чтения
-    BATCH_SIZE = 10_000 # для bulk insert
-    CHUNKSIZE = 100_000 # резерв
+    MAX_ROWS = 10_000_000
+    BATCH_SIZE = 100_000  # Оптимальный размер батча для вставки
+    CHUNKSIZE = 100_000  # Размер чанка для чтения CSV
+
+    @classmethod
+    def process_data_chunk(cls, df: pd.DataFrame, file_name: str, is_first_chunk: bool) -> pd.DataFrame:
+        """Обработка чанка данных"""
+        # Нормализация данных
+        if is_first_chunk:
+            df = _collapse_to_header_and_data(df)
+        
+        df = _rename_using_mapping(df)
+        df.columns = _make_unique_columns(df.columns.tolist())
+        
+        # Добавление временных меток
+        m, y = _extract_month_year_from_filename(file_name)
+        if m: df["sale_month"] = str(m).zfill(2)
+        if y: df["sale_year"] = str(y)
+        
+        # Очистка данных
+        df = _drop_all_nulls(df)
+        for col in df.columns:
+            df[col] = df[col].astype(str).str.strip().str.slice(0, 255)
+        
+        return df.replace("nan", "")
+
+
+    @staticmethod
+    def read_csv_safely_chunked(file_path: str, chunksize: int) -> pd.DataFrame:
+        # Определение разделителя
+        with open(file_path, "r", encoding="utf-8-sig", errors="replace") as f:
+            sample = f.read(50000)
+        
+        counts = {sep: sample.count(sep) for sep in (";", ",", "\t")}
+        sep = max(counts, key=counts.get) if max(counts.values()) > 0 else ";"
+        
+        # Чтение по чанкам
+        return pd.read_csv(
+            file_path,
+            sep=sep,
+            dtype="string",
+            chunksize=chunksize,
+            encoding="utf-8-sig",
+            on_bad_lines="warn",
+            decimal=",",
+            thousands=" ",
+            engine="c"
+        )
+
+    @classmethod
+    def create_table_if_not_exists(cls, df: pd.DataFrame, table_name: str, engine: Engine):
+        try:
+            with engine.begin() as conn:
+                if not conn.execute(text(f"""
+                    SELECT 1 FROM information_schema.tables 
+                    WHERE table_schema='raw' AND table_name='{table_name}'
+                """)).scalar():
+                    columns_sql = ", ".join(
+                        f"[{col.replace(']', '').replace('[', '')}] NVARCHAR(255)"
+                        for col in df.columns
+                    )
+                    conn.execute(text(f"CREATE TABLE raw.{table_name} ({columns_sql})"))
+                    logger.info(f"Создана таблица raw.{table_name}")
+        except Exception as e:
+            logger.error(f"Ошибка при создании таблицы: {e}")
+            raise
 
     @classmethod
     def process_x5_file(cls, file_path: str, engine: Engine) -> str:
@@ -289,7 +352,40 @@ class X5TableProcessor:
         if ext in (".xlsx", ".xls"):
             sheets = read_excel_safely(file_path, nrows=cls.MAX_ROWS)
         elif ext == ".csv":
-            sheets = {"data": read_csv_safely(file_path, nrows=cls.MAX_ROWS)}
+            chunk_iter = cls.read_csv_safely_chunked(file_path, cls.CHUNKSIZE)
+            first_chunk = True
+            created_table = False  # Флаг, что таблица создана
+            total_rows = 0
+
+            for df_chunk in chunk_iter:
+                if df_chunk.empty:
+                    continue
+
+                # Обработка каждого чанка
+                processed_chunk = cls.process_data_chunk(df_chunk, file_name, first_chunk)
+                
+                if processed_chunk.empty:
+                    logger.info("Чанк пуст, пропускаем.")
+                    continue
+
+                # Первый чанк: создаем таблицу
+                if first_chunk:
+                    if not processed_chunk.empty or not created_table:
+                        try:
+                            cls.create_table_if_not_exists(processed_chunk, table_name, engine)
+                            created_table = True
+                        except Exception as e:
+                            logger.error(f"Ошибка создания таблицы: {e}")
+                            raise
+                    first_chunk = False
+
+                # Вставка данных
+                cls.bulk_insert_x5(processed_chunk, table_name, engine)
+                total_rows += len(processed_chunk)
+                logger.info(f"Вставлено {len(processed_chunk)} строк (всего: {total_rows})")
+            
+            logger.info(f"Всего загружено {total_rows} строк в raw.{table_name}")
+            return table_name
         else:
             raise ValueError(f"Неподдерживаемый формат: {file_path}")
 
@@ -373,40 +469,88 @@ class X5TableProcessor:
         logger.info(f"Файл {file_name} загружен в raw.{table_name} за {dur:.2f} сек ({len(final_df)} строк).")
         return table_name
 
+
     @classmethod
     def bulk_insert_x5(cls, df: pd.DataFrame, table_name: str, engine: Engine):
-        @event.listens_for(engine, "before_cursor_execute")
-        def _set_fast(conn, cursor, statement, parameters, context, executemany):  # pragma: no cover
-            if executemany:
-                cursor.fast_executemany = True
-
-        str_df = df.copy()
-        for c in str_df.columns:
-            str_df[c] = str_df[c].astype("string").fillna("").str.slice(0, 255)
-
-        rows = list(str_df.itertuples(index=False, name=None))
-        if not rows:
-            logger.warning(f"[X5] bulk_insert_x5: нет строк для вставки в raw.{table_name}")
+        if df.empty:
+            logger.info("DataFrame пуст, вставка не требуется.")
             return
 
-        with closing(engine.raw_connection()) as raw_conn:
-            with raw_conn.cursor() as cursor:
-                cols = ", ".join(f"[{c.replace(']','').replace('[','')}]" for c in str_df.columns)
-                params = ", ".join(["?"] * len(str_df.columns))
-                sql = f"INSERT INTO raw.{table_name} ({cols}) VALUES ({params})"
+        # 1. Узнаём текущие колонки таблицы
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_schema='raw' AND table_name=:tbl
+                """), {"tbl": table_name})
+                table_columns = [row[0] for row in result]
+        except Exception as e:
+            logger.error(f"Ошибка при получении колонок: {e}")
+            return
 
-                logger.debug(f"[X5] Пример строки для вставки: {rows[0]}")
+        # 2. Добавляем недостающие колонки
+        new_columns = [col for col in df.columns if col not in table_columns]
+        if new_columns:
+            try:
+                with engine.begin() as conn:
+                    for col in new_columns:
+                        clean_col = col.replace("]", "").replace("[", "")
+                        conn.execute(text(f"ALTER TABLE raw.{table_name} ADD [{clean_col}] NVARCHAR(255)"))
+                table_columns += new_columns
+            except Exception as e:
+                logger.error(f"Ошибка добавления колонок: {e}")
+                return
 
-                for i in range(0, len(rows), cls.BATCH_SIZE):
-                    batch = rows[i:i + cls.BATCH_SIZE]
-                    try:
-                        cursor.executemany(sql, batch)
-                        raw_conn.commit()
-                    except Exception as e:  # pragma: no cover
-                        raw_conn.rollback()
-                        logger.error(f"[X5] Ошибка вставки батча {i}-{i+len(batch)}: {e}")
-                        raise
+        # 3. Перестраиваем df по колонкам таблицы
+        df = df.reindex(columns=table_columns, fill_value="")
 
+        if df.shape[1] == 0:
+            logger.error("Нет колонок для вставки.")
+            return
+
+        # 4. Готовим данные (всё в Python str или None)
+        records = []
+        for row in df.itertuples(index=False, name=None):
+            rec = []
+            for v in row:
+                if pd.isna(v) or v == "nan":
+                    rec.append(None)
+                else:
+                    rec.append(str(v)[:255])
+            records.append(tuple(rec))
+
+        if not records:
+            logger.warning("Нет данных для вставки после фильтрации.")
+            return
+
+        batch_size = 10_000
+        num_batches = (len(records) + batch_size - 1) // batch_size
+
+        columns_sql = ", ".join(f"[{c}]" for c in table_columns)
+        placeholders = ", ".join(["?"] * len(table_columns))
+        insert_sql = f"INSERT INTO raw.{table_name} ({columns_sql}) VALUES ({placeholders})"
+
+        try:
+            raw_conn = engine.raw_connection()
+            try:
+                cursor = raw_conn.cursor()
+                cursor.fast_executemany = True
+
+                for i in range(num_batches):
+                    start = i * batch_size
+                    end = min((i + 1) * batch_size, len(records))
+                    batch = records[start:end]
+                    logger.info(f"Вставка батча {i+1}/{num_batches} ({len(batch)} строк)")
+                    cursor.executemany(insert_sql, batch)
+
+                raw_conn.commit()
+                logger.info(f"Успешно вставлено {len(records)} строк.")
+            finally:
+                raw_conn.close()
+        except Exception as e:
+            logger.error(f"Ошибка вставки (raw pyodbc): {e}", exc_info=True)
+            raise
 
 # ------------------------------------------------------------------ #
 # Public wrapper                                                     #

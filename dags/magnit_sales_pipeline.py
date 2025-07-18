@@ -24,10 +24,11 @@ DEFAULT_CONN_STAGE = (
 )
 
 class MagnitConfig:
-    MAX_CONCURRENT_TASKS = 4
+    MAX_CONCURRENT_TASKS = 1
     MAX_FILES_PER_RUN = 8
-    TASK_TIMEOUT = timedelta(minutes=45)
+    TASK_TIMEOUT = timedelta(minutes=120)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
+    POOL_SLOTS = 8  # Увеличить с 6
 
     DATA_DIR = "/opt/airflow/data"
     ARCHIVE_DIR = "/opt/airflow/archive"
@@ -159,7 +160,7 @@ def read_magnit_file(file_path: str, max_rows: Optional[int] = None) -> Optional
             return pd.read_excel(
                 file_path, 
                 engine='openpyxl',
-                nrows=max_rows  # Ограничение строк для Excel
+                nrows=max_rows,  # Ограничение строк для Excel,
             )
     except Exception as e:
         logging.warning(f"Standard read failed, trying fallbacks: {str(e)}")
@@ -175,7 +176,7 @@ def read_magnit_file(file_path: str, max_rows: Optional[int] = None) -> Optional
         
         for strategy in strategies:
             try:
-                return pd.read_csv(file_path, **strategy)
+                return pd.read_csv(file_path, chunksize=50000)
             except:
                 continue
     
@@ -262,7 +263,7 @@ def process_magnit_file(file_path: str):
             archive_empty_file(file_path, empty=True)
             return
 
-        df = read_magnit_file(file_path, max_rows=10000)
+        df = read_magnit_file(file_path)
         if df is None or df.empty:
             logging.error(f"Failed to read data from file: {file_path}")
             # Move problematic file to archive with _ERROR suffix
@@ -288,8 +289,7 @@ def process_magnit_file(file_path: str):
                 table_name=table_name,
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
-                stage_schema=MagnitConfig.STAGE_SCHEMA,
-                limit = 10000
+                stage_schema=MagnitConfig.STAGE_SCHEMA
             )
             logging.info("Magnit data loaded to stage")
         except exc.SQLAlchemyError as e:

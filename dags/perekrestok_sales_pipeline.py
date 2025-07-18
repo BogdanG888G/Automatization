@@ -33,7 +33,7 @@ DEFAULT_CONN_STAGE = (
 class PerekConfig:
     MAX_CONCURRENT_TASKS = 4
     MAX_FILES_PER_RUN = 8
-    TASK_TIMEOUT = timedelta(minutes=45)
+    TASK_TIMEOUT = timedelta(minutes=60)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
 
     DATA_DIR = "/opt/airflow/data"
@@ -307,7 +307,7 @@ def process_perek_file(file_path: str):
             archive_perek_file(file_path, empty=True)
             return
 
-        df = read_perek_file(file_path, max_rows=10000)
+        df = read_perek_file(file_path, max_rows=100000000)
         if df is None or df.empty:
             logging.error(f"[Perek] Failed to read data from file: {file_path}")
             archive_perek_file(file_path, error=True)
@@ -334,7 +334,7 @@ def process_perek_file(file_path: str):
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
                 stage_schema=PerekConfig.STAGE_SCHEMA,
-                limit=10000,
+                limit=100000000,
             )
             logging.info("[Perek] Data loaded to stage.")
         except exc.SQLAlchemyError as e:

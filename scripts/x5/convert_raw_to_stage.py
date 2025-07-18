@@ -245,7 +245,7 @@ def _bulk_insert(df: pd.DataFrame, table_name: str, engine, schema: str):
                 return
 
             # батчами
-            BATCH_SIZE = 50_000
+            BATCH_SIZE = 100_000
             for i in range(0, len(rows), BATCH_SIZE):
                 batch = rows[i:i + BATCH_SIZE]
                 try:
@@ -302,3 +302,6 @@ def convert_raw_to_stage(table_name: str, raw_engine, stage_engine, stage_schema
     except Exception as e:
         logger.error(f"[X5 Stage ERROR] Ошибка при обработке таблицы {table_name}: {e}", exc_info=True)
         raise
+
+def schedule_stage_conversion(table_name: str, raw_engine, stage_engine, stage_schema='x5', limit=None):
+    return convert_raw_to_stage(table_name, raw_engine, stage_engine, stage_schema, limit)
