@@ -153,7 +153,7 @@ def process_okey_file(file_path: str):
 
         # Здесь можно использовать функцию чтения из пятерочки или написать свою,
         # но для примера - просто попробуем загрузить первые 10000 строк
-        df = pd.read_excel(file_path, engine='openpyxl', nrows=10000)  # или кастомный reader
+        df = pd.read_excel(file_path, engine='openpyxl', nrows=None)  # или кастомный reader
         if df is None or df.empty:
             logging.error(f"Failed to read data from file: {file_path}")
             archive_file(file_path, error=True)
@@ -178,7 +178,7 @@ def process_okey_file(file_path: str):
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
                 stage_schema=OkeyConfig.STAGE_SCHEMA,
-                limit=10000,
+                limit=None,
                 drop_stage_if_exists=True,  # <<< ОБЯЗАТЕЛЬНО один прогон
             )
             logging.info("Okey data loaded to stage")

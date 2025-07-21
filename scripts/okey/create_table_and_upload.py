@@ -294,26 +294,12 @@ class OkeyTableProcessor:
     # ------------------------------------------------------------------
     @classmethod
     def bulk_insert_okey(cls, df: pd.DataFrame, table_name: str, engine: Engine):
-        """Batch insert into raw.<table_name> (all values as strings)."""
+        """Batch insert into raw.<table_name> (all values as strings) using chunks."""
 
         @event.listens_for(engine, 'before_cursor_execute')
-        def _set_fast_executemany(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        def _set_fast_executemany(conn, cursor, statement, parameters, context, executemany):
             if executemany:
                 cursor.fast_executemany = True
-
-        data: List[tuple] = []
-        for row in df.itertuples(index=False, name=None):
-            clean_row = []
-            for value in row:
-                if pd.isna(value) or value in ('', None):
-                    clean_row.append('')
-                else:
-                    s = str(value).strip()
-                    # allow up to 1000 chars; DB col is 255 so driver will truncate if param longer; we pre‑truncate
-                    if len(s) > 255:
-                        s = s[:255]
-                    clean_row.append(s)
-            data.append(tuple(clean_row))
 
         cols = ', '.join(f'[{col}]' for col in df.columns)
         params = ', '.join(['?'] * len(df.columns))
@@ -321,17 +307,31 @@ class OkeyTableProcessor:
 
         with closing(engine.raw_connection()) as conn:
             with conn.cursor() as cursor:
-                logger.debug("[O'KEY] Пример данных для вставки: %s", data[0] if data else None)
-                try:
-                    cursor.executemany(insert_sql, data)
-                    conn.commit()
-                    logger.debug("[O'KEY] Успешно вставлено %s записей", len(data))
-                except Exception as e:  # noqa: BLE001
-                    conn.rollback()
-                    logger.error(
-                        "[O'KEY] Ошибка вставки. Первая строка: %s. Ошибка: %s", data[0] if data else None, e
-                    )
-                    raise
+                total_rows = len(df)
+                logger.info("[O'KEY] Начало вставки %s строк в таблицу raw.%s", total_rows, table_name)
+
+                for start in range(0, total_rows, cls.BATCH_SIZE):
+                    batch_df = df.iloc[start:start + cls.BATCH_SIZE]
+                    batch_data = [
+                        tuple(
+                            (str(val).strip()[:255] if pd.notna(val) and val != '' else '')
+                            for val in row
+                        )
+                        for row in batch_df.itertuples(index=False, name=None)
+                    ]
+
+                    try:
+                        cursor.executemany(insert_sql, batch_data)
+                        conn.commit()
+                        logger.debug("[O'KEY] Вставлен пакет строк: %s-%s", start, start + len(batch_data))
+                    except Exception as e:
+                        conn.rollback()
+                        logger.error(
+                            "[O'KEY] Ошибка вставки пакета строк %s-%s: %s",
+                            start, start + len(batch_data), e
+                        )
+                        raise
+
 
 
 def create_okey_table_and_upload(file_path: str, engine: Engine) -> str:

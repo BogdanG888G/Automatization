@@ -479,7 +479,7 @@ def process_diksi_file(file_path: str) -> None:
             return
 
         # Quick read (sample) primarily for logging & sanity; actual load done in create_table_and_upload_diksi
-        df_sample = read_diksi_file(file_path, max_rows=10000)
+        df_sample = read_diksi_file(file_path, max_rows=None)
         if df_sample is None or df_sample.empty:
             logging.error(f"Failed to read data from file: {file_path}")
             archive_empty_file(file_path, error=True)
@@ -515,7 +515,7 @@ def process_diksi_file(file_path: str) -> None:
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
                 stage_schema=DiksiConfig.STAGE_SCHEMA,
-                limit=10000,
+                limit=None,
             )
             logging.info("Diksi data loaded to stage")
         except exc.SQLAlchemyError as e:  # pragma: no cover
