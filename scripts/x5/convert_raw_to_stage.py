@@ -208,11 +208,14 @@ def _bulk_insert(df: pd.DataFrame, table_name: str, engine, schema: str):
     """
     Создаём таблицу (если нет) + массовая вставка.
     """
+    logger.info(f"[X5 Stage] Начало bulk_insert: {schema}.{table_name}, количество строк: {len(df)}")
+
     # подготовка типов
     cols_ddl = []
     for col in df.columns:
         sql_type = X5ColumnConfig.NUMERIC_COLS.get(col, 'NVARCHAR(255)')
         cols_ddl.append(f'[{col}] {sql_type}')
+    logger.debug(f"[X5 Stage] DDL для {schema}.{table_name}: {', '.join(cols_ddl)}")
 
     create_sql = f"""
     IF NOT EXISTS (
@@ -229,7 +232,9 @@ def _bulk_insert(df: pd.DataFrame, table_name: str, engine, schema: str):
 
     with closing(engine.connect()) as conn:
         with conn.begin():
+            logger.info(f"[X5 Stage] Проверка/создание таблицы {schema}.{table_name}")
             conn.execute(text(create_sql))
+            logger.info(f"[X5 Stage] Таблица {schema}.{table_name} готова к вставке данных.")
 
         # pyodbc cursor
         with conn.connection.cursor() as cursor:  # type: ignore[attr-defined]
@@ -241,18 +246,21 @@ def _bulk_insert(df: pd.DataFrame, table_name: str, engine, schema: str):
 
             rows = _df_to_param_rows(df)
             if not rows:
-                logger.warning(f"[X5 Stage] bulk_insert: нет данных для вставки в {schema}.{table_name}")
+                logger.warning(f"[X5 Stage] Нет данных для вставки в {schema}.{table_name}")
                 return
 
-            # батчами
-            BATCH_SIZE = 100_000
+            BATCH_SIZE = 50_000
+            logger.info(f"[X5 Stage] Начало вставки данных батчами по {BATCH_SIZE} строк.")
             for i in range(0, len(rows), BATCH_SIZE):
                 batch = rows[i:i + BATCH_SIZE]
                 try:
                     cursor.executemany(insert_sql, batch)
+                    logger.debug(f"[X5 Stage] Успешно вставлен батч {i}-{i+len(batch)} строк.")
                 except Exception as e:  # pragma: no cover
-                    logger.error(f"[X5 Stage] Ошибка executemany батча {i}-{i+len(batch)}: {e}")
+                    logger.error(f"[X5 Stage] Ошибка executemany батча {i}-{i+len(batch)}: {e}", exc_info=True)
                     raise
+
+            logger.info(f"[X5 Stage] Вставка завершена. Всего вставлено {len(rows)} строк в {schema}.{table_name}.")
 
 
 # ------------------------------------------------------------------ #
