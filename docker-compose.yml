@@ -24,10 +24,11 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
-      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
-      PYTHONPATH: /opt/airflow/scripts
+      AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
+      AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "True"
+      AIRFLOW__CORE__LOG_FETCH_TIMEOUT_SEC: "0"
+      AIRFLOW__CORE__DAG_FILE_PROCESSOR_TIMEOUT: "50"
+      AIRFLOW__LOGGING__LOGGING_LEVEL: "INFO"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts
