@@ -24,9 +24,9 @@ DEFAULT_CONN_STAGE = (
 
 class Config:
     MAX_CONCURRENT_TASKS = 2
-    MAX_FILES_PER_RUN = 5
-    TASK_TIMEOUT = timedelta(minutes=30)
-    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+    MAX_FILES_PER_RUN = 8
+    TASK_TIMEOUT = timedelta(minutes=60)
+    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024 * 1024 # 4GB
 
     DATA_DIR = "/opt/airflow/data"
     ARCHIVE_DIR = "/opt/airflow/archive"
@@ -193,6 +193,30 @@ def scan_files() -> List[str]:
         logging.error(f"File scanning error: {str(e)}", exc_info=True)
         raise
 
+import shutil
+
+def safe_copy(src, dst, buffer_size=16 * 1024 * 1024):
+    """Copy large files in chunks to avoid os.sendfile errors."""
+    with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
+        while True:
+            buf = fsrc.read(buffer_size)
+            if not buf:
+                break
+            fdst.write(buf)
+    shutil.copystat(src, dst)
+
+
+def safe_move(src, dst):
+    try:
+        shutil.move(src, dst)
+    except OSError as e:
+        if e.errno == 18:  # cross-device
+            logging.warning(f"Cross-device move detected. Using safe_copy: {src} -> {dst}")
+            safe_copy(src, dst)
+            os.remove(src)
+        else:
+            raise
+
 @task(
     task_id="process_file",
     retries=2,
@@ -202,34 +226,37 @@ def scan_files() -> List[str]:
     pool_slots=1
 )
 def process_file(file_path: str):
-    """Process a single file"""
+    """Process a single file (load into raw -> stage -> archive)."""
     try:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        elif file_path.lower().endswith(('.xlsx', '.xls', '.xlsb')):
+        # === 1. Convert Excel to CSV if needed ===
+        if file_path.lower().endswith(('.xlsx', '.xls', '.xlsb')):
             from common.convert_xlsx_to_csv import convert_excel_to_csv
             csv_paths = convert_excel_to_csv(file_path, max_rows=10000)
+            if not csv_paths:
+                raise ValueError(f"No CSV generated from Excel: {file_path}")
             logging.info(f"Converted Excel to CSV files: {csv_paths}")
-            # Если несколько csv, можно брать первый (или расширить логику)
             file_path = csv_paths[0]
-            df = read_csv_with_fallback(file_path)
-        else:
-            df = read_csv_with_fallback(file_path)
 
+        # === 2. Read CSV ===
+        df = read_csv_with_fallback(file_path)
         if df is None or df.empty:
-            raise ValueError("Failed to read file data")
+            raise ValueError(f"Failed to read file data or file is empty: {file_path}")
 
-        # Database operations
+        # === 3. Load to raw ===
         engine_test = get_engine('test')
         try:
-            from ashan.create_table_and_upload import create_table_and_upload
-            table_name = create_table_and_upload(file_path, engine=engine_test)
-            logging.info(f"Data loaded to raw.{table_name}")
+            from ashan.create_table_and_upload import create_ashan_table_and_upload
+            table_name = create_ashan_table_and_upload(file_path, engine=engine_test)
+            logging.info(f"[Raw] Loaded {len(df)} rows to raw.{table_name}")
         except exc.SQLAlchemyError as e:
-            engine_test.dispose()
             raise RuntimeError(f"Raw load error: {str(e)}")
+        finally:
+            engine_test.dispose()
 
+        # === 4. Load to stage ===
         engine_stage = get_engine('stage')
         try:
             from ashan.convert_raw_to_stage import convert_raw_to_stage
@@ -238,20 +265,18 @@ def process_file(file_path: str):
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
                 stage_schema=Config.STAGE_SCHEMA,
-                limit=10000
+                limit=100000
             )
-            logging.info("Data loaded to stage")
+            logging.info("[Stage] Data successfully loaded to stage")
         except exc.SQLAlchemyError as e:
-            engine_stage.dispose()
             raise RuntimeError(f"Stage load error: {str(e)}")
         finally:
-            engine_test.dispose()
             engine_stage.dispose()
 
-        # Archive file
+        # === 5. Archive file ===
         os.makedirs(Config.ARCHIVE_DIR, exist_ok=True)
         archive_path = os.path.join(Config.ARCHIVE_DIR, os.path.basename(file_path))
-        shutil.move(file_path, archive_path)
+        safe_move(file_path, archive_path)
         logging.info(f"File archived: {archive_path}")
 
     except Exception as e:
