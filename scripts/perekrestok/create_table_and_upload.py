@@ -31,7 +31,7 @@ class PerekrestokTableProcessor:
     """
 
     CHUNKSIZE = 100_000
-    BATCH_SIZE = 10_000
+    BATCH_SIZE = 50_000
     MAX_ROWS = None  # safety cap
 
     # Month map: full, short, dotted, digit mix, latin translit, common typos
@@ -273,109 +273,94 @@ class PerekrestokTableProcessor:
             logger.error("[Perekrestok] Excel read error: %s", e)
             raise
 
+    @classmethod
+    def _process_and_insert_chunk(cls, df, table_name, fname_month, fname_year, engine, create_table: bool):
+        # Нормализация и очистка
+        df = cls.normalize_perek_columns(df)
+
+        month, year = fname_month, fname_year
+        if (month is None or year is None) and 'period' in df.columns and not df['period'].isna().all():
+            m2, y2 = cls.extract_perek_metadata(str(df['period'].iloc[0]))
+            month = month or m2
+            year = year or y2
+        if month and year:
+            df['sale_year'] = str(year)
+            df['sale_month'] = str(month).zfill(2)
+
+        df = df.fillna('')
+
+        # Векторная очистка строковых столбцов
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = (
+                    df[col].str.strip()
+                          .str.replace('\u200b', '', regex=False)
+                          .str.replace('\r\n', ' ', regex=False)
+                          .str.replace('\n', ' ', regex=False)
+                )
+
+        if create_table:
+            with engine.begin() as conn:
+                exists = conn.execute(
+                    text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'raw' AND table_name = :table"),
+                    {"table": table_name}
+                ).scalar()
+                if not exists:
+                    cols_sql = [f"[{col}] NVARCHAR(255)" for col in df.columns]
+                    create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
+                    conn.execute(text(create_sql))
+
+        cls.bulk_insert_perek(df, table_name, engine)
+
     # ------------------------------------------------------------------ #
     # Main processing                                                     #
     # ------------------------------------------------------------------ #
     @classmethod
-    def process_perek_file(cls, file_path: str, engine: Engine) -> str:
-        """Read Perekrestok file -> normalise -> load to raw schema.
-
-        Returns created table name in *raw*.
-        """
+    def process_perek_file(cls, file_path: str, engine):
+        import time
         start_time = time.time()
         file_name = os.path.basename(file_path)
         base_name = os.path.splitext(file_name)[0]
-        table_name = re.sub(r"\\W+", "_", file_name.lower())  # keep extension‑safe base or full? use full for uniqueness
-        table_name = re.sub(r"\\W+", "_", base_name.lower())
+        table_name = re.sub(r"\W+", "_", base_name.lower())
 
-        logger.info("[Perekrestok] Начало обработки файла: %s (<=%s строк)", file_name, cls.MAX_ROWS)
-
-        # --- read
-        if file_path.endswith('.xlsx'):
-            reader = cls._read_excel_file(file_path)
-        elif file_path.endswith('.xlsb'):
-            reader = cls._read_xlsb_file(file_path)
-        elif file_path.endswith('.csv'):
-            reader = {'data': cls._safe_read_perek_csv(file_path)}
+        # Read file
+        if file_path.endswith('.csv'):
+            # читаем CSV чанками для памяти
+            reader = pd.read_csv(
+                file_path,
+                dtype='string',
+                sep=';',
+                quotechar='"',
+                decimal=',',
+                thousands=' ',
+                chunksize=cls.CHUNKSIZE,
+                on_bad_lines='warn',
+                encoding='utf-8-sig',
+            )
+        elif file_path.endswith('.xlsx') or file_path.endswith('.xlsb'):
+            # для Excel - пока полный прочтём (лучше конвертировать в CSV вне скрипта)
+            reader = cls._read_excel_file(file_path) if file_path.endswith('.xlsx') else cls._read_xlsb_file(file_path)
         else:
             raise ValueError(f"Unsupported file format: {file_path}")
 
-        # infer metadata from filename once
+        # Метаданные
         fname_month, fname_year = cls.extract_perek_metadata(file_name)
 
-        processed_chunks: List[pd.DataFrame] = []
-        for sheet_name, df in reader.items():
-            if df.empty:
-                logger.warning("[Perekrestok] Лист %s пуст", sheet_name)
-                continue
-            logger.info("[Perekrestok] Обработка листа %s, строк: %s", sheet_name, len(df))
-
-            try:
-                df = cls.normalize_perek_columns(df)
-
-                # fallback: if no file metadata, try period column
-                month = fname_month
-                year = fname_year
-                if (month is None or year is None) and 'period' in df.columns and not df['period'].isna().all():
-                    m2, y2 = cls.extract_perek_metadata(str(df['period'].iloc[0]))
-                    month = month or m2
-                    year = year or y2
-
-                if month and year:
-                    df = df.assign(sale_year=str(year), sale_month=str(month).zfill(2))
-
-                # clean values (all strings in raw)
-                df = df.replace([np.nan, None], '')
-                for col in df.columns:
-                    df[col] = (
-                        df[col]
-                        .astype(str)
-                        .str.strip()
-                        .str.replace('\\u200b', '', regex=False)
-                        .str.replace('\\r\\n', ' ', regex=False)
-                        .str.replace('\\n', ' ', regex=False)
-                    )
-
-                processed_chunks.append(df)
-            except Exception as e:  # noqa: BLE001
-                logger.error("[Perek] Ошибка обработки листа %s: %s", sheet_name, e, exc_info=True)
-                continue
-
-        if not processed_chunks:
-            raise ValueError("File contains no valid data")
-
-        final_df = pd.concat(processed_chunks, ignore_index=True)
-        if final_df.empty:
-            raise ValueError("No data after processing")
-
-            # --- ensure raw table exists (all NVARCHAR(255))
-        with engine.begin() as conn:
-            exists = conn.execute(
-                text("""
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = 'raw' AND table_name = :table
-                """),
-                {"table": table_name},
-            ).scalar()
-
-            if not exists:
-                cols_sql = []
-                for col in final_df.columns:
-                    clean_col = col.replace('"', '').replace("'", '')
-                    cols_sql.append(f"[{clean_col}] NVARCHAR(255)")
-                create_table_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
-                logger.debug("[Perekrestok] SQL создания таблицы: %s", create_table_sql)
-                conn.execute(text(create_table_sql))
-
-        # --- insert
-        cls.bulk_insert_perek(final_df, table_name, engine)
+        # Создаем таблицу при необходимости
+        first_chunk = True
+        for chunk in (reader if isinstance(reader, pd.io.parsers.TextFileReader) else [reader]):
+            if isinstance(chunk, dict):
+                # excel case: dict(sheet_name -> df)
+                for sheet_name, df in chunk.items():
+                    cls._process_and_insert_chunk(df, table_name, fname_month, fname_year, engine, first_chunk)
+                    first_chunk = False
+            else:
+                # csv chunk case
+                cls._process_and_insert_chunk(chunk, table_name, fname_month, fname_year, engine, first_chunk)
+                first_chunk = False
 
         duration = time.time() - start_time
-        logger.info(
-            "[Perekrestok] Файл %s успешно загружен в raw.%s за %.2f сек (%s строк)",
-            file_name, table_name, duration, len(final_df)
-        )
+        print(f"[Perekrestok] Файл {file_name} загружен в raw.{table_name} за {duration:.2f} сек")
         return table_name
 
 
@@ -383,45 +368,23 @@ class PerekrestokTableProcessor:
     # Bulk insert                                                        #
     # ------------------------------------------------------------------ #
     @classmethod
-    def bulk_insert_perek(cls, df: pd.DataFrame, table_name: str, engine: Engine):
-        """Batch insert into raw.<table_name> (all values as strings)."""
+    def bulk_insert_perek(cls, df, table_name, engine):
+        conn = engine.raw_connection()
+        cursor = conn.cursor()
+        cursor.fast_executemany = True
 
-        @event.listens_for(engine, 'before_cursor_execute')
-        def _set_fast_executemany(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
-            if executemany:
-                cursor.fast_executemany = True
+        cols = df.columns.tolist()
+        insert_sql = f"INSERT INTO raw.{table_name} ({', '.join([f'[{c}]' for c in cols])}) VALUES ({', '.join(['?' for _ in cols])})"
 
-        # prepare data rows
-        data: List[tuple] = []
-        for row in df.itertuples(index=False, name=None):
-            clean_row = []
-            for value in row:
-                if pd.isna(value) or value in ('', None):
-                    clean_row.append('')
-                else:
-                    s = str(value).strip()
-                    if len(s) > 255:
-                        s = s[:255]
-                    clean_row.append(s)
-            data.append(tuple(clean_row))
+        data = df.values.tolist()
+        batch_size = cls.BATCH_SIZE
 
-        cols = ', '.join(f'[{col}]' for col in df.columns)
-        params = ', '.join(['?'] * len(df.columns))
-        insert_sql = f"INSERT INTO raw.{table_name} ({cols}) VALUES ({params})"
-
-        with closing(engine.raw_connection()) as conn:
-            with conn.cursor() as cursor:
-                logger.debug("[Perekrestok] Пример данных для вставки: %s", data[0] if data else None)
-                try:
-                    cursor.executemany(insert_sql, data)
-                    conn.commit()
-                    logger.debug("[Perek] Успешно вставлено %s записей", len(data))
-                except Exception as e:  # noqa: BLE001
-                    conn.rollback()
-                    logger.error(
-                        "[Perekrestok] Ошибка вставки. Первая строка: %s. Ошибка: %s", data[0] if data else None, e
-                    )
-                    raise
+        for i in range(0, len(data), batch_size):
+            batch = data[i:i + batch_size]
+            cursor.executemany(insert_sql, batch)
+        conn.commit()
+        cursor.close()
+        conn.close()
 
 
 def create_perek_table_and_upload(file_path: str, engine: Engine) -> str:
