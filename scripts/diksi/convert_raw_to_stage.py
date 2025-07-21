@@ -8,7 +8,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Пример настроек ColumnConfig — нужно заменить на твои реальные данные
 class ColumnConfig:
     RENAME_MAP = {
         'списания,_руб.': 'writeoff_amount_rub',
@@ -48,7 +47,6 @@ class ColumnConfig:
         'сумма_с_ндс.5': 'amount_with_vat_summary',
         'sale_year': 'sale_year',
         'sale_month': 'sale_month'
-        # Добавь остальные переименования
     }
     NUMERIC_COLS = {
         'writeoff_amount_rub',
@@ -60,9 +58,7 @@ class ColumnConfig:
         'margin_amount_rub',
         'avg_sell_price',
         'avg_purchase_price',
-        # Добавь остальные числовые колонки
     }
-
 
 def sanitize_and_make_unique_columns(columns):
     seen = {}
@@ -71,115 +67,71 @@ def sanitize_and_make_unique_columns(columns):
     def _sanitize_column_name(name: str) -> str:
         if not name or not isinstance(name, str):
             return ''
-
         original_name = name.lower()
-
-        special_mappings = {
-            'списания,_руб.': 'writeoff_amount_rub',
-            'списания,_шт.': 'writeoff_quantity',
-            'продажи,_c_ндс': 'sales_amount_with_vat',
-            'потери,_руб.': 'loss_amount_rub',
-            'потери,шт': 'loss_quantity',
-            'промо_продажи,_c_ндс': 'promo_sales_amount_with_vat',
-            'маржа,_руб.': 'margin_amount_rub',
-            'ср.цена_продажи': 'avg_sell_price',
-            'ср.цена_покупки': 'avg_purchase_price'
-        }
-
+        special_mappings = ColumnConfig.RENAME_MAP
         if original_name in special_mappings:
             return special_mappings[original_name]
-
-        # Заменяем все символы кроме латиницы, цифр и _ на _
+        # Заменяем всё кроме латиницы, цифр, и _
         name = re.sub(r'[^a-z0-9_]', '_', original_name)
-        name = re.sub(r'_{2,}', '_', name)  # Сокращаем несколько _ подряд до одного
-        name = name.strip('_')
-
-        return name
+        name = re.sub(r'_{2,}', '_', name)
+        return name.strip('_')
 
     for i, col in enumerate(columns):
         sanitized = _sanitize_column_name(col)
         if not sanitized:
-            sanitized = f"col_{i}"  # Для пустых имен даем уникальное имя
-
+            sanitized = f"col_{i}"
         base_name = sanitized
         count = seen.get(base_name, 0)
         if count > 0:
             sanitized = f"{base_name}_{count}"
         seen[base_name] = count + 1
-
         sanitized_columns.append(sanitized)
 
     return sanitized_columns
 
-
 def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    logger.info(f"Original columns: {df.columns.tolist()}")
-    
-    # Нормализуем имена колонок
+    # Приводим к lower и с заменой пробелов
     df.columns = [col.lower().replace(' ', '_') for col in df.columns]
     
-    # Сопоставляем колонки с русскими именами, которые есть в DataFrame, с английскими для конвертации
-    numeric_cols = {ru: en for ru, en in ColumnConfig.RENAME_MAP.items() if en in ColumnConfig.NUMERIC_COLS}
-    
-    for ru_col, en_col in numeric_cols.items():
-        if ru_col in df.columns:
-            try:
-                df[en_col] = (
-                    df[ru_col]
-                    .astype(str)
-                    .str.replace(',', '.')  # заменяем запятую на точку
-                    .str.replace(r'[^\d.]', '', regex=True)  # удаляем все, кроме цифр и точки
-                    .replace('', '0')  # пустые строки заменяем на '0'
-                    .astype(np.float64)
-                    .fillna(0)
-                )
-                df.drop(ru_col, axis=1, inplace=True)
-            except Exception as e:
-                logger.error(f"Error converting column {ru_col}: {e}")
-                raise
-    
-    logger.info(f"Columns after numeric conversion: {df.columns.tolist()}")
+    # Ищем числовые колонки по переименованию и конвертим
+    for ru_col, en_col in ColumnConfig.RENAME_MAP.items():
+        if en_col in ColumnConfig.NUMERIC_COLS and ru_col in df.columns:
+            df[en_col] = (
+                df[ru_col]
+                .astype(str)
+                .str.replace(',', '.')
+                .str.replace(r'[^\d.]', '', regex=True)
+                .replace('', '0')
+                .astype(float)
+                .fillna(0)
+            )
+            df.drop(columns=[ru_col], inplace=True)
     return df
-
 
 def _convert_string_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [col.lower().replace(' ', '_') for col in df.columns]
-    
     for ru_col, en_col in ColumnConfig.RENAME_MAP.items():
-        if ru_col in df.columns:
-            try:
-                df[en_col] = df[ru_col].astype('string').fillna('')
-                if ru_col != en_col:
-                    df.drop(ru_col, axis=1, inplace=True)
-            except Exception as e:
-                logger.error(f"Error converting string column {ru_col}: {e}")
-                raise
-    
+        if ru_col in df.columns and en_col not in ColumnConfig.NUMERIC_COLS:
+            df[en_col] = df[ru_col].astype('string').fillna('')
+            if ru_col != en_col:
+                df.drop(columns=[ru_col], inplace=True)
     return df
 
-
 def _create_stage_table(conn: engine.Connection, table_name: str, df: pd.DataFrame, schema: str = 'diksi') -> None:
-    logger.info(f"DataFrame columns before table creation: {df.columns.tolist()}")
-    
-    # Сначала корректно обработать названия колонок (sanitize_and_make_unique_columns принимает список, тут df.columns — Index)
+    # Обработка имен колонок и их типов
     new_columns = sanitize_and_make_unique_columns(list(df.columns))
     df.columns = new_columns
-    
+
     if len(df.columns) != len(set(df.columns)):
         duplicates = [col for col in df.columns if df.columns.tolist().count(col) > 1]
         raise ValueError(f"Duplicate column names after sanitization: {duplicates}")
-    
-    safe_columns = []
+
+    col_defs = []
     for col in df.columns:
-        if not col:
-            continue
         col_type = 'FLOAT' if col in ColumnConfig.NUMERIC_COLS else 'NVARCHAR(255)'
-        safe_columns.append(f'[{col}] {col_type}')
-    
-    if not safe_columns:
-        raise ValueError("No valid columns to create table")
-    
-    create_table_sql = f"""
+        col_defs.append(f'[{col}] {col_type}')
+
+    create_sql = f"""
     IF NOT EXISTS (
         SELECT * FROM sys.tables t
         JOIN sys.schemas s ON t.schema_id = s.schema_id
@@ -187,21 +139,21 @@ def _create_stage_table(conn: engine.Connection, table_name: str, df: pd.DataFra
     )
     BEGIN
         CREATE TABLE [{schema}].[{table_name}] (
-            {', '.join(safe_columns)}
+            {', '.join(col_defs)}
         )
     END
     """
-    
+
     try:
         trans = conn.begin()
-        conn.execute(text(create_table_sql))
+        conn.execute(text(create_sql))
         trans.commit()
+        logger.info(f"Table [{schema}].[{table_name}] created or already exists")
     except Exception as e:
         if 'trans' in locals():
             trans.rollback()
-        logger.error(f"Error creating table: {e}\nSQL: {create_table_sql}")
+        logger.error(f"Error creating table: {e}")
         raise
-
 
 def _bulk_insert_data(conn: engine.Connection, table_name: str, df: pd.DataFrame, schema: str = 'diksi') -> None:
     if df.empty:
@@ -209,45 +161,35 @@ def _bulk_insert_data(conn: engine.Connection, table_name: str, df: pd.DataFrame
         return
     
     safe_columns = sanitize_and_make_unique_columns(list(df.columns))
-    if not safe_columns:
-        raise ValueError("No valid columns for insertion")
-    
-    # Проверяем наличие данных
-    row_count_result = conn.execute(text(f"SELECT COUNT(*) FROM [{schema}].[{table_name}]"))
-    row_count = row_count_result.scalar()
-    if row_count > 0:
-        logger.info(f"Table [{schema}].[{table_name}] already contains data ({row_count} rows), skipping insert")
-        return
-    
-    data = []
-    for row in df.itertuples(index=False):
-        processed_row = []
-        for val, col in zip(row, safe_columns):
-            if col in ColumnConfig.NUMERIC_COLS:
-                processed_val = float(val) if pd.notna(val) else 0.0
-            else:
-                processed_val = str(val) if pd.notna(val) else ''
-            processed_row.append(processed_val)
-        data.append(tuple(processed_row))
-    
-    cols = ', '.join([f'[{col}]' for col in safe_columns])
-    params = ', '.join(['?'] * len(safe_columns))
+    df.columns = safe_columns
+
+    cols_str = ', '.join([f'[{col}]' for col in safe_columns])
+    params_str = ', '.join(['?'] * len(safe_columns))
     
     raw_conn = conn.connection
     cursor = raw_conn.cursor()
     try:
         cursor.fast_executemany = True
-        insert_sql = f"INSERT INTO [{schema}].[{table_name}] ({cols}) VALUES ({params})"
+        insert_sql = f"INSERT INTO [{schema}].[{table_name}] ({cols_str}) VALUES ({params_str})"
+        data = []
+        for row in df.itertuples(index=False):
+            processed_row = []
+            for val, col in zip(row, safe_columns):
+                if col in ColumnConfig.NUMERIC_COLS:
+                    processed_val = float(val) if pd.notna(val) else 0.0
+                else:
+                    processed_val = str(val) if pd.notna(val) else ''
+                processed_row.append(processed_val)
+            data.append(tuple(processed_row))
         cursor.executemany(insert_sql, data)
         raw_conn.commit()
         logger.info(f"Inserted {len(df)} rows into [{schema}].[{table_name}]")
     except Exception as e:
         raw_conn.rollback()
-        logger.error(f"Error inserting data: {e}\nSQL: {insert_sql}")
+        logger.error(f"Error inserting data: {e}")
         raise
     finally:
         cursor.close()
-
 
 def convert_raw_to_stage(
     table_name: str,
@@ -259,82 +201,57 @@ def convert_raw_to_stage(
     try:
         start_time = datetime.now()
         logger.info(f"[Stage] Starting processing of table {table_name}")
-        
-        with raw_engine.connect() as conn:
-            try:
-                result = conn.execute(
-                    text(
-                        f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-                        f"WHERE TABLE_SCHEMA = 'raw' AND TABLE_NAME = :table_name"
-                    ),
-                    {'table_name': table_name},
-                )
-                actual_columns = [row[0].lower().replace(' ', '_') for row in result]
-                logger.info(f"Actual columns in raw table: {actual_columns}")
 
-                total_count = conn.execute(text(f"SELECT COUNT(*) FROM raw.{table_name}")).scalar()
-                logger.info(f"[Stage] Total rows to process: {total_count}")
-            except Exception as e:
-                logger.error(f"Error getting table metadata: {e}")
-                raise
-        
-        valid_rename_map = {
-            ru: en for ru, en in ColumnConfig.RENAME_MAP.items() if ru in actual_columns
-        }
-        logger.info(f"Active RENAME_MAP: {valid_rename_map}")
-        
-        chunks: List[pd.DataFrame] = []
+        # Получаем колонки из raw таблицы
+        with raw_engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = 'raw' AND TABLE_NAME = :table_name"
+                ),
+                {'table_name': table_name}
+            )
+            actual_columns = [row[0].lower().replace(' ', '_') for row in result]
+            logger.info(f"Actual columns in raw table: {actual_columns}")
+
+            total_count = conn.execute(text(f"SELECT COUNT(*) FROM raw.{table_name}")).scalar()
+            logger.info(f"[Stage] Total rows to process: {total_count}")
+
         query = f"SELECT * FROM raw.{table_name}"
         if limit is not None:
             query += f" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
-        
-        with raw_engine.connect().execution_options(stream_results=True) as conn:
-            try:
-                for chunk in pd.read_sql(text(query), conn, chunksize=50000, dtype='object'):
+
+        with stage_engine.connect() as stage_conn:
+            # Создадим пустую таблицу по структуре из первого чанка
+            first_chunk_processed = False
+
+            with raw_engine.connect().execution_options(stream_results=True) as raw_conn:
+                for chunk in pd.read_sql(text(query), raw_conn, chunksize=50000, dtype='object'):
                     chunk.columns = [col.lower().replace(' ', '_') for col in chunk.columns]
-                    logger.info(f"Received chunk with columns: {chunk.columns.tolist()}")
-                    
+                    logger.info(f"Chunk received with columns: {chunk.columns.tolist()} and rows: {len(chunk)}")
+
                     chunk = _convert_numeric_columns(chunk)
                     chunk = _convert_string_columns(chunk)
-                    chunks.append(chunk)
-                    
-                    processed_count = sum(len(c) for c in chunks)
-                    logger.info(f"[Stage] Processed {processed_count}/{limit if limit else total_count} rows")
-                    
-                    if limit is not None and processed_count >= limit:
-                        break
-            except Exception as e:
-                logger.error(f"Error reading data: {e}")
-                raise
-        
-        if not chunks:
-            logger.warning("[Stage] No data to process")
-            return
-        
-        df = pd.concat(chunks, ignore_index=True)
-        if limit is not None:
-            df = df.head(limit)
-        logger.info(f"Final columns after processing: {df.columns.tolist()}")
-        del chunks
-        
-        if df.empty or len(df.columns) == 0:
-            raise ValueError("DataFrame contains no data or columns after processing")
-        
-        with stage_engine.connect() as conn:
-            trans = None
-            try:
-                trans = conn.begin()
-                df.columns = sanitize_and_make_unique_columns(list(df.columns))
-                _create_stage_table(conn, table_name, df, stage_schema)
-                _bulk_insert_data(conn, table_name, df, stage_schema)
-                trans.commit()
-                duration = (datetime.now() - start_time).total_seconds()
-                logger.info(f"[Stage] Successfully loaded {len(df)} rows in {duration:.2f} sec")
-            except Exception as e:
-                if trans:
-                    trans.rollback()
-                logger.error(f"Error loading to stage: {e}")
-                raise
+
+                    chunk.columns = sanitize_and_make_unique_columns(list(chunk.columns))
+
+                    if not first_chunk_processed:
+                        _create_stage_table(stage_conn, table_name, chunk, stage_schema)
+                        first_chunk_processed = True
+
+                    try:
+                        trans = stage_conn.begin()
+                        _bulk_insert_data(stage_conn, table_name, chunk, stage_schema)
+                        trans.commit()
+                    except Exception as e:
+                        trans.rollback()
+                        logger.error(f"Error inserting chunk: {e}")
+                        raise
+
+                    logger.info(f"[Stage] Processed chunk with {len(chunk)} rows")
+
+        logger.info(f"[Stage] Finished processing table {table_name} in {datetime.now() - start_time}")
+
     except Exception as e:
-        logger.error(f"[Stage ERROR] Error processing table {table_name}: {str(e)}")
+        logger.error(f"Failed to convert table {table_name}: {e}")
         raise
