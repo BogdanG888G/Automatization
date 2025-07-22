@@ -1,63 +1,9 @@
-"""convert_raw_to_stage_optimized.py
-====================================
-
-High‑volume RAW→STAGE transformation + load pipeline for Magnit data.
-
-Why this rewrite?
------------------
-The original implementation worked for modest data sizes but ran into trouble on
-~million‑row tables due to:
-
-* Creating the STAGE table from a *set* of column names (bug) instead of a DataFrame sample.
-* Repeated lower/replace passes on columns per chunk.
-* Passing wrong arg type into `_convert_string_columns` (expected `year`, given dict).
-* Opening a new DB connection for every chunk insert (high overhead).
-* Not reusing prepared INSERT statement; building strings repeatedly.
-* Lack of deterministic column order -> INSERT column mismatch.
-* Missing type coercion for many numeric columns; inconsistent decimal cleanup.
-* Potentially expensive `SELECT *` with client‑side limit instead of server‑side TOP/ORDER.
-* Stage existence check running against the raw engine by mistake.
-
-This optimized version fixes those issues and adds:
-
-* **Canonical STAGE schema** (ordered) built from union of 2024/2025 layouts.
-* **Idempotent create / truncate / append policy** via `if_exists`.
-* **Vectorized numeric cleanup** (space thousands, comma decimal, stray chars).
-* **Efficient streaming read** via `pd.read_sql(..., chunksize=N)` (server‑side cursor).
-* **Single fast_executemany pyodbc cursor** reused across all chunks.
-* **Progress logging** (rows, rows/s) + optional callback.
-* **Date harmonization** – 2024 month‑only -> date 1st‑of‑month; 2025 has sales_date.
-* **Filler defaults** for missing columns.
-* **Chunk memory trimming** – drop raw RU columns promptly.
-
-Quick start
------------
-
-```python
-from sqlalchemy import create_engine
-from convert_raw_to_stage_optimized import convert_raw_to_stage
-
-raw_engine = create_engine(RAW_CONN_STR)
-stage_engine = create_engine(STAGE_CONN_STR)
-
-convert_raw_to_stage(
-    table_name="magnit_mart_2025",  # RAW table name (already loaded)
-    raw_engine=raw_engine,
-    stage_engine=stage_engine,
-    stage_schema="magnit",
-    if_exists="append",  # or 'replace_truncate' to wipe first
-    chunk_size=100_000,   # tune
-)
-```
-
-"""
-
 from __future__ import annotations
 
 import logging
 import re
 from datetime import datetime
-from typing import Dict, Any, List, Iterable, Optional, Tuple
+from typing import Dict, Any, List, Iterable, Optional, Tuple, Callable
 
 import numpy as np
 import pandas as pd
@@ -67,12 +13,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
-# Column configuration & canonical target schema
-# ------------------------------------------------------------------
-
+# =====================================================================================
+# Canonical Stage schema config
+# =====================================================================================
 class ColumnConfig:
-    """Configuration: numeric targets, RU→EN renames (2024 vs 2025)."""
+    """Configuration: numeric targets, RU→EN renames (2024 vs 2025), RAW_TURBO aliases."""
 
     NUMERIC_COLS = {
         'turnover_amount_rub': {'dtype': 'float64', 'default': 0.0},
@@ -96,83 +41,129 @@ class ColumnConfig:
 
     # Minimal 2024 mapping (month granularity; fewer metrics)
     RENAME_MAP_2024 = {
-        'month': 'sales_month',
-        'формат': 'store_format',
-        'наименование_тт': 'store_name',
-        'код_тт': 'store_code',
-        'адрес_тт': 'store_address',
-        'уровень_1': 'product_level_1',
-        'уровень_2': 'product_level_2',
-        'уровень_3': 'product_level_3',
-        'уровень_4': 'product_level_4',
-        'поставщик': 'supplier_name',
-        'бренд': 'brand',
-        'наименование_тп': 'product_name',
-        'код_тп': 'product_code',
-        'шк': 'barcode',
-        'оборот_руб': 'turnover_amount_rub',
-        'оборот_шт': 'turnover_quantity',
-        'входящая_цена': 'incoming_price',
+        'month': 'month',
+        'формат': 'формат',
+        'наименование_тт': 'наименование_тт',
+        'код_тт': 'код_тт',
+        'адрес_тт': 'адрес_тт',
+        'уровень_1': 'уровень_1',
+        'уровень_2': 'уровень_2',
+        'уровень_3': 'уровень_3',
+        'уровень_4': 'уровень_4',
+        'поставщик': 'поставщик',
+        'бренд': 'бренд',
+        'наименование_тп': 'наименование_тп',
+        'код_тп': 'код_тп',
+        'шк': 'шк',
+        'оборот_руб': 'оборот_руб',
+        'оборот_шт': 'оборот_шт',
+        'входящая_цена': 'входящая_цена',
     }
+
 
     # Expanded 2025 mapping (day granularity; richer metrics)
     RENAME_MAP_2025 = {
-        'month': 'sales_month',  # sometimes present in raw
-        'дата': 'sales_date',
-        'формат': 'store_format',
-        'наименование_тт': 'store_name',
-        'код_тт': 'store_code',
-        'адрес_тт': 'store_address',
+    'month': 'sales_month',
+    'дата': 'sales_date',
+    'формат': 'store_format',
+    'наименование_тт': 'store_name',
+    'код_тт': 'store_code',
+    'адрес_тт': 'store_address',
+    'уровень_1': 'product_level_1',
+    'уровень_2': 'product_level_2',
+    'уровень_3': 'product_level_3',
+    'уровень_4': 'product_level_4',
+    'поставщик': 'supplier_name',
+    'бренд': 'brand',
+    'наименование_тп': 'product_name',
+    'код_тп': 'product_code',
+    'шк': 'barcode',
+    'оборот_руб': 'turnover_amount_rub',
+    'оборот_шт': 'turnover_quantity',
+    'входящая_цена': 'incoming_price',
+    'код_группы': 'product_group_code',
+    'группа': 'product_group_name',
+    'код_категории': 'product_category_code',
+    'категория': 'product_category_name',
+    'код_подкатегории': 'product_subcategory_code',
+    'подкатегория': 'product_subcategory_name',
+    'артикул': 'product_article',
+    'код_поставщика': 'supplier_code',
+    'регион': 'region',
+    'город': 'city',
+    'ср_цена_продажи': 'avg_sell_price',
+    'списания_руб': 'writeoff_amount_rub',
+    'списания_шт': 'writeoff_quantity',
+    'продажи_руб': 'sales_amount_rub',
+    'продажи_кг': 'sales_weight_kg',
+    'продажи_шт': 'sales_quantity',
+    'маржа_руб': 'margin_amount_rub',
+    'потери_руб': 'loss_amount_rub',
+    'потери_шт': 'loss_quantity',
+    'промо_продажи_руб': 'promo_sales_amount_rub',
+    'остаток_шт': 'stock_quantity',
+    'остаток_руб': 'stock_amount_rub',
+    'скидка_руб': 'discount_amount_rub',
+}
+
+
+    RENAME_MAP_RAW_TURBO = {
+        'year': 'tmp_year',                 # intermediate → sales_month
+        'код': 'store_code',
+        'store_name': 'store_name',         # already EN
+        'адрес': 'store_address',
         'уровень_1': 'product_level_1',
         'уровень_2': 'product_level_2',
         'уровень_3': 'product_level_3',
         'уровень_4': 'product_level_4',
-        'поставщик': 'supplier_name',
+        'position_code': 'product_article', # alt SKU id
+        'наименование': 'product_name',
         'бренд': 'brand',
+        'поставщик': 'supplier_name',
+        'barcode': 'barcode',
+        'quantity_sold': 'sales_quantity',
+        'себестоимсть_в_руб.': 'incoming_price',  # total cost per line
+        'sales_amount': 'sales_amount_rub',       # line revenue
+        'оборот_шт': 'sales_quantity',
+        'входящая_цена': 'incoming_price',
+        'наименование_тт': 'store_name',
+        'код_тт': 'store_code',
+        'адрес_тт': 'store_address',
+        'формат': 'store_format',
         'наименование_тп': 'product_name',
         'код_тп': 'product_code',
         'шк': 'barcode',
-        'оборот_руб': 'turnover_amount_rub',
-        'оборот_шт': 'turnover_quantity',
-        'входящая_цена': 'incoming_price',
-        'код_группы': 'product_group_code',
-        'группа': 'product_group_name',
-        'код_категории': 'product_category_code',
-        'категория': 'product_category_name',
-        'код_подкатегории': 'product_subcategory_code',
-        'подкатегория': 'product_subcategory_name',
-        'артикул': 'product_article',
-        'код_поставщика': 'supplier_code',
-        'регион': 'region',
-        'город': 'city',
-        'ср_цена_продажи': 'avg_sell_price',
-        'списания_руб': 'writeoff_amount_rub',
-        'списания_шт': 'writeoff_quantity',
-        'продажи_руб': 'sales_amount_rub',
-        'продажи_кг': 'sales_weight_kg',
-        'продажи_шт': 'sales_quantity',
-        'маржа_руб': 'margin_amount_rub',
-        'потери_руб': 'loss_amount_rub',
-        'потери_шт': 'loss_quantity',
-        'промо_продажи_руб': 'promo_sales_amount_rub',
-        'остаток_шт': 'stock_quantity',
-        'остаток_руб': 'stock_amount_rub',
-        'скидка_руб': 'discount_amount_rub',
+        'month': 'sales_month',
+        'поставщик': 'supplier_name',
     }
 
-    # RU month to number (Titlecase & lowercase accepted)
+
+    # RU month to number
     MONTH_MAP_RU = {
         'январь': '01', 'февраль': '02', 'март': '03', 'апрель': '04', 'май': '05', 'июнь': '06',
         'июль': '07', 'август': '08', 'сентябрь': '09', 'октябрь': '10', 'ноябрь': '11', 'декабрь': '12',
-        'январь_': '01', 'февраль_': '02', # defensive extras if stray chars
+    }
+
+    # English month map (for filename parsing)
+    MONTH_MAP_EN = {
+        'jan': 1, 'january': 1,
+        'feb': 2, 'february': 2,
+        'mar': 3, 'march': 3,
+        'apr': 4, 'april': 4,
+        'may': 5,
+        'jun': 6, 'june': 6,
+        'jul': 7, 'july': 7,
+        'aug': 8, 'august': 8,
+        'sep': 9, 'sept': 9, 'september': 9,
+        'oct': 10, 'october': 10,
+        'nov': 11, 'november': 11,
+        'dec': 12, 'december': 12,
     }
 
     @classmethod
     def canonical_stage_columns(cls) -> List[str]:
-        """Return ordered list of *all* canonical stage columns."""
         base_dims = [
-            'sales_date',      # daily if available
-            'sales_month',     # YYYY-MM first day
+            'sales_date', 'sales_month',
             'store_format', 'store_name', 'store_code', 'store_address',
             'region', 'city',
             'supplier_code', 'supplier_name',
@@ -187,25 +178,208 @@ class ColumnConfig:
         return base_dims + metrics
 
 
-# Precompute canonical order once
+# Precompute canonical order
 CANON_STAGE_COLS = ColumnConfig.canonical_stage_columns()
 CANON_STAGE_SET = set(CANON_STAGE_COLS)
 
-# ------------------------------------------------------------------
-# Detection helpers
-# ------------------------------------------------------------------
 
-_RU_MONTH_RE = re.compile("[А-Яа-я]+")
+RU_STAGE_EN_MAP = {
+'month': 'month',
+'формат': 'store_format',
+'наименование_тт': 'store_name',
+'код_тт': 'store_code',
+'адрес_тт': 'store_address',
+'уровень_1': 'level_1',
+'уровень_2': 'level_2',
+'уровень_3': 'level_3',
+'уровень_4': 'level_4',
+'поставщик': 'supplier_name',
+'бренд': 'brand',
+'наименование_тп': 'product_name',
+'код_тп': 'product_code',
+'шк': 'barcode',
+'оборот_руб': 'turnover_rub',
+'оборот_шт': 'turnover_qty',
+'входящая_цена': 'purchase_price',
+# load_dt handled separately (added in DDL)
+}
+# columns we TREAT AS NUMERIC metrics (DECIMAL + numeric coercion)
+STAGE_NUMERIC_METRICS = {'turnover_rub', 'turnover_qty', 'purchase_price'}
 
 
-def _detect_year(df: pd.DataFrame) -> int:
-    """Rudimentary format detection.
+NUMERIC_COLS = {
+        'turnover_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'turnover_quantity': {'dtype': 'float64', 'default': 0.0},
+        'incoming_price': {'dtype': 'float64', 'default': 0.0},
+        'avg_sell_price': {'dtype': 'float64', 'default': 0.0},
+        'writeoff_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'writeoff_quantity': {'dtype': 'float64', 'default': 0.0},
+        'sales_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'sales_weight_kg': {'dtype': 'float64', 'default': 0.0},
+        'sales_quantity': {'dtype': 'float64', 'default': 0.0},
+        'avg_purchase_price': {'dtype': 'float64', 'default': 0.0},
+        'margin_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'loss_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'loss_quantity': {'dtype': 'float64', 'default': 0.0},
+        'promo_sales_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'stock_quantity': {'dtype': 'float64', 'default': 0.0},
+        'stock_amount_rub': {'dtype': 'float64', 'default': 0.0},
+        'discount_amount_rub': {'dtype': 'float64', 'default': 0.0},
+    }
 
-    Heuristics:
-    * If column 'дата' present (case insensitive) -> 2025 layout.
-    * Else if column 'month' w/ RU month words in sample -> 2024 layout.
-    * Default -> 2025.
+def _convert_numeric_cols(chunk: pd.DataFrame) -> pd.DataFrame:
+    for col, props in NUMERIC_COLS.items():
+        if col in chunk.columns:
+            # Пытаемся конвертировать к float64, ошибки в NaN
+            chunk[col] = pd.to_numeric(chunk[col], errors='coerce')
+            # Заполняем NaN дефолтным значением
+            chunk[col].fillna(props['default'], inplace=True)
+    return chunk
+
+
+# columns that look like ID / codes but лучше хранить текстом (NVARCHAR)
+STAGE_ID_LIKE_TEXT = {'store_code', 'product_code', 'barcode'}
+
+# regex: drop these RAW cols
+DROP_COL_PAT = re.compile(r"^none_\d+$", re.I)
+
+_CTRL_RE = re.compile(r"[\x00-\x1F\x7F-\x9F]")
+_NON_NUM_RE = re.compile(r"[^0-9.\-]")
+
+def _norm_text_series(s: pd.Series) -> pd.Series:
+    return (
+        s.astype(str)
+         .str.replace(_CTRL_RE, '', regex=True)
+         .str.strip()
+         .replace({'nan': None, 'None': None, '': None})
+    )
+
+def _norm_numeric_series(s: pd.Series) -> pd.Series:
+    return (
+        s.astype(str)
+         .str.replace(' ', '', regex=False)
+         .str.replace(',', '.', regex=False)
+         .str.replace(_NON_NUM_RE, '', regex=True)
+         .replace({'': None})
+         .astype(float)
+    )
+
+_FLOATISH_RE = re.compile(r'^-?\d+(\.\d+)?$')
+
+def _text_from_floatish(s: pd.Series) -> pd.Series:
+    """'260309.000000' -> '260309'; '1000235032.000000' -> '1000235032'."""
+    x = s.astype(str).str.strip()
+    x = x.where(~x.str.fullmatch(_FLOATISH_RE), x.str.replace(r'\.0+$', '', regex=True))
+    return x.replace({'nan': None, 'None': None, '': None})
+
+
+def _stage_column_list_from_raw(sample_df: pd.DataFrame) -> list[str]:
     """
+    Возвращает:
+      stage_cols_en – список английских имен колонок для Stage (RU→EN_MAP или identity)
+    Порядок сохраняется.
+    """
+    stage_cols_en = []
+    seen = set()
+
+    for c in sample_df.columns:
+        if DROP_COL_PAT.match(str(c)):
+            continue
+        en = RU_STAGE_EN_MAP.get(c.lower(), c)
+        base = en
+        idx = 1
+        while en in seen:
+            idx += 1
+            en = f"{base}_{idx}"
+        seen.add(en)
+        stage_cols_en.append(en)
+
+    return stage_cols_en
+
+
+
+
+def _mirror_col_sql_en(col: str) -> str:
+    cl = col.lower()
+    if cl in STAGE_NUMERIC_METRICS:
+        return f'[{col}] DECIMAL(38, 6) NULL'
+    # codes as NVARCHAR – длинные, чтобы не отрезать адреса
+    if cl in STAGE_ID_LIKE_TEXT or cl.endswith('_code'):
+        return f'[{col}] NVARCHAR(255) NULL'
+    # адреса и произвольный текст
+    return f'[{col}] NVARCHAR(4000) NULL'
+
+
+def _create_stage_table_mirror(
+    stage_engine: Engine,
+    table_name: str,
+    stage_cols_en: list[str],
+    schema: str = 'magnit',
+    if_exists: str = 'append',
+) -> None:
+    insp = inspect(stage_engine)
+    exists = insp.has_table(table_name, schema=schema)
+    full_table = f"[{schema}].[{table_name}]"
+
+    if exists:
+        if if_exists == 'fail':
+            raise RuntimeError(f"Stage table {full_table} already exists.")
+        elif if_exists == 'replace_truncate':
+            logger.info("Truncating existing stage table %s", full_table)
+            with stage_engine.begin() as conn:
+                conn.execute(text(f"TRUNCATE TABLE {full_table}"))
+        else:
+            logger.debug("Stage table %s exists; appending.", full_table)
+        return
+
+    cols_sql = ',\n    '.join(_mirror_col_sql_en(c) for c in stage_cols_en)
+    create_sql = f"""
+    CREATE TABLE {full_table} (
+        {cols_sql},
+        load_dt DATETIME DEFAULT GETDATE()
+    );
+    """
+    with stage_engine.begin() as conn:
+        conn.execute(text(create_sql))
+    logger.info("Created Stage table %s (%d cols).", full_table, len(stage_cols_en))
+
+
+def _apply_basic_cleaning_stage(chunk: pd.DataFrame, raw_cols: list[str], stage_cols_en: list[str]) -> pd.DataFrame:
+    """
+    chunk: DataFrame, ещё в raw именах (подмножество raw_cols)
+    raw_cols: порядок исходных колонок
+    stage_cols_en: целевые имена того же размера
+    Returns new DF с переименованными колонками и базовой очисткой.
+    """
+    # Отбираем и выравниваем колонки
+    chunk = chunk[raw_cols].copy()
+    rename_map = dict(zip(raw_cols, stage_cols_en))
+    chunk.rename(columns=rename_map, inplace=True)
+
+    # Очистка
+    for c in chunk.columns:
+        cl = c.lower()
+        if cl in STAGE_NUMERIC_METRICS:
+            try:
+                chunk[c] = _norm_numeric_series(chunk[c])
+            except Exception:
+                chunk[c] = pd.to_numeric(chunk[c], errors='coerce')
+        elif cl in STAGE_ID_LIKE_TEXT:
+            chunk[c] = _text_from_floatish(chunk[c])
+        else:
+            chunk[c] = _norm_text_series(chunk[c])
+    return chunk
+
+
+# =====================================================================================
+# Detection helpers
+# =====================================================================================
+_RU_MONTH_RE = re.compile("[А-Яа-я]+")
+_EN_MONTH_RE = re.compile("(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*", re.I)
+_YEAR_RE = re.compile(r"(20\d{2})")
+
+
+def _detect_layout_year_from_sample(df: pd.DataFrame) -> int:
     low = [c.lower() for c in df.columns]
     if any(c == 'дата' for c in low):
         return 2025
@@ -213,23 +387,60 @@ def _detect_year(df: pd.DataFrame) -> int:
         sample = str(df.iloc[0, low.index('month')]) if not df.empty else ''
         if _RU_MONTH_RE.search(sample):
             return 2024
+    # if we saw 'year' numeric in raw_turbo
+    if 'year' in low:
+        try:
+            y = pd.to_numeric(df.iloc[0, low.index('year')], errors='coerce')
+            if 2000 <= y <= 2100:
+                return int(y)
+        except Exception:  # pragma: no cover
+            pass
     return 2025
 
 
+def _infer_month_year_from_name(name: str) -> Tuple[Optional[int], Optional[int]]:
+    """Extract (month_int, year_int) from table_name or filename."""
+    low = name.lower()
+    # month
+    m = None
+    m_match = _EN_MONTH_RE.search(low)
+    if m_match:
+        m = ColumnConfig.MONTH_MAP_EN.get(m_match.group(1)[:3]) or ColumnConfig.MONTH_MAP_EN.get(m_match.group(1))
+    # year
+    y = None
+    y_match = _YEAR_RE.search(low)
+    if y_match:
+        y = int(y_match.group(1))
+    return m, y
+
+
 def _active_rename_map(df: pd.DataFrame, year: int) -> Dict[str, str]:
+    """Select best rename map based on sample columns."""
     low_cols = {c.lower(): c for c in df.columns}
-    src_map = ColumnConfig.RENAME_MAP_2024 if year == 2024 else ColumnConfig.RENAME_MAP_2025
+
+    # direct 2025 match?
+    score_2025 = sum(1 for k in ColumnConfig.RENAME_MAP_2025 if k in low_cols)
+    score_2024 = sum(1 for k in ColumnConfig.RENAME_MAP_2024 if k in low_cols)
+    score_turbo = sum(1 for k in ColumnConfig.RENAME_MAP_RAW_TURBO if k in low_cols)
+
+    if score_turbo >= max(score_2024, score_2025):
+        src_map = ColumnConfig.RENAME_MAP_RAW_TURBO
+    elif year == 2024 and score_2024 >= score_2025:
+        src_map = ColumnConfig.RENAME_MAP_2024
+    else:
+        src_map = ColumnConfig.RENAME_MAP_2025
+
     active: Dict[str, str] = {}
-    for ru, en in src_map.items():
-        if ru in low_cols:
-            active[low_cols[ru]] = en  # preserve original case key
+    for ru_low, en in src_map.items():
+        if ru_low in low_cols:
+            active[low_cols[ru_low]] = en
     return active
 
 
-# ------------------------------------------------------------------
+# =====================================================================================
 # Cleaning helpers
-# ------------------------------------------------------------------
-
+# =====================================================================================
+import unicodedata
 _CLEAN_CTRL = re.compile(r"[\x00-\x1F\x7F-\x9F]")
 _NON_NUMERIC_KEEP = re.compile(r"[^0-9.\-]")
 
@@ -237,19 +448,19 @@ _NON_NUMERIC_KEEP = re.compile(r"[^0-9.\-]")
 def _clean_text(s: pd.Series) -> pd.Series:
     return (
         s.astype(str)
-        .str.normalize('NFKC')
-        .str.replace(_CLEAN_CTRL, '', regex=True)
-        .str.strip()
-        .replace({'nan': ''})
+         .str.normalize('NFKC')
+         .str.replace(_CLEAN_CTRL, '', regex=True)
+         .str.strip()
+         .replace({'nan': ''})
     )
 
 
 def _clean_numeric(s: pd.Series) -> pd.Series:
     return (
         s.astype(str)
-        .str.replace(' ', '', regex=False)
-        .str.replace(',', '.', regex=False)
-        .str.replace(_NON_NUMERIC_KEEP, '', regex=True)
+         .str.replace(' ', '', regex=False)
+         .str.replace(',', '.', regex=False)
+         .str.replace(_NON_NUMERIC_KEEP, '', regex=True)
     )
 
 
@@ -257,91 +468,84 @@ def _parse_float(s: pd.Series) -> pd.Series:
     return pd.to_numeric(_clean_numeric(s), errors='coerce').astype('float64')
 
 
-# ------------------------------------------------------------------
-# Column conversions
-# ------------------------------------------------------------------
-
-def _convert_string_columns(df: pd.DataFrame, active_map: Dict[str, str]) -> pd.DataFrame:
-    """Rename & clean string columns according to active RU→EN map."""
-    if not active_map:
-        return df
-    for ru_col, en_col in active_map.items():
-        if ru_col in df.columns:
-            df[en_col] = _clean_text(df[ru_col])
-            if en_col != ru_col:
-                df.drop(columns=[ru_col], inplace=True)
-    return df
-
-
-def _convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    for tgt_col in ColumnConfig.NUMERIC_COLS:
-        if tgt_col in df.columns:
-            df[tgt_col] = _parse_float(df[tgt_col]).fillna(ColumnConfig.NUMERIC_COLS[tgt_col]['default'])
-    return df
-
-
-# ------------------------------------------------------------------
-# Date harmonization
-# ------------------------------------------------------------------
+# =====================================================================================
+# Date helpers
+# =====================================================================================
 
 def _parse_sales_month(series: pd.Series, year_default: Optional[int] = None) -> pd.Series:
-    """Convert RU month labels to first‑of‑month date."""
     if series.empty:
         return pd.to_datetime(pd.Series([], dtype='datetime64[ns]'))
-    # Lowercase for map lookup
     s = series.astype(str).str.lower().str.strip()
-    def _map_month(val: str) -> str:
-        m = ColumnConfig.MONTH_MAP_RU.get(val, None)
-        if m is None:
-            # try prefix match (e.g., 'январь 2024')
-            for k, v in ColumnConfig.MONTH_MAP_RU.items():
-                if val.startswith(k):
-                    return v
-            return None
-        return m
-    mapped = s.map(_map_month)
+    mapped = s.map(ColumnConfig.MONTH_MAP_RU).fillna('01')
     if year_default is None:
-        # try to pull a 4‑digit year from original string; fallback current year
         yrs = s.str.extract(r"(20\d{2})", expand=False)
         year_series = yrs.fillna(datetime.utcnow().year).astype(int).astype(str)
     else:
         year_series = pd.Series([year_default] * len(s), index=s.index, dtype="object")
-    out = '"' + year_series + '-' + mapped.fillna('01') + '-01"'
-    # fallback -> parse; invalid -> NaT
-    dt = pd.to_datetime(year_series + '-' + mapped.fillna('01') + '-01', errors='coerce')
+    dt = pd.to_datetime(year_series + '-' + mapped + '-01', errors='coerce')
     return dt
 
 
-def _derive_date_fields(df: pd.DataFrame, year: int) -> pd.DataFrame:
-    # If sales_date already there, parse -> date.
+def _derive_date_fields(df: pd.DataFrame, year_guess: int, table_name: str) -> pd.DataFrame:
+    # 1) if sales_date present → parse
     if 'sales_date' in df.columns:
         df['sales_date'] = pd.to_datetime(df['sales_date'], errors='coerce').dt.date
-        # also produce sales_month if missing
         if 'sales_month' not in df.columns:
-            df['sales_month'] = pd.to_datetime(df['sales_date'], errors='coerce').dt.to_period('M').dt.to_timestamp().dt.date
-    # Else if sales_month present but as RU string -> parse
-    elif 'sales_month' in df.columns:
-        dt = _parse_sales_month(df['sales_month'], year_default=year)
+            df['sales_month'] = pd.to_datetime(df['sales_date']).dt.to_period('M').dt.to_timestamp().dt.date
+        return df
+
+    # 2) if tmp_year + month from filename
+    month_fn, year_fn = _infer_month_year_from_name(table_name)
+
+    # try 'tmp_year' numeric col from RAW_TURBO mapping
+    tmp_year_series = None
+    if 'tmp_year' in df.columns:
+        tmp_year_series = pd.to_numeric(df['tmp_year'], errors='coerce').astype('Int64')
+
+    # Year priority: tmp_year col > year_fn > year_guess
+    used_year = None
+    if tmp_year_series is not None and tmp_year_series.notna().any():
+        used_year = int(tmp_year_series.dropna().iloc[0])
+    elif year_fn is not None:
+        used_year = year_fn
+    else:
+        used_year = year_guess
+
+    if month_fn is not None and used_year is not None:
+        df['sales_month'] = pd.to_datetime({
+            'year': [used_year] * len(df),
+            'month': [month_fn] * len(df),
+            'day': [1] * len(df)
+        })
+        df['sales_date'] = pd.NaT  # unknown day
+        return df
+
+    # 3) fallback: sales_month from RU text if present
+    if 'sales_month' in df.columns:
+        dt = _parse_sales_month(df['sales_month'], year_default=used_year)
         df['sales_month'] = dt.dt.date
-        df['sales_date'] = None  # unknown day
+        df['sales_date'] = pd.NaT
+        return df
+
+    # final fallback
+    df['sales_month'] = pd.NaT
+    df['sales_date'] = pd.NaT
     return df
 
 
-# ------------------------------------------------------------------
+# =====================================================================================
 # Stage table DDL
-# ------------------------------------------------------------------
+# =====================================================================================
 
 def _stage_col_sql(col: str) -> str:
     if col in ColumnConfig.NUMERIC_COLS:
         return f'[{col}] DECIMAL(18, 2) NULL'
     if col in ('sales_date', 'sales_month'):
         return f'[{col}] DATE NULL'
-    # strings
     return f'[{col}] NVARCHAR(255) NULL'
 
 
 def _create_stage_table(stage_engine: Engine, table_name: str, if_exists: str = 'append', schema: str = 'magnit') -> None:
-    """Idempotent create/truncate stage table using canonical schema."""
     insp = inspect(stage_engine)
     exists = insp.has_table(table_name, schema=schema)
     full_table = f"[{schema}].[{table_name}]"
@@ -354,7 +558,7 @@ def _create_stage_table(stage_engine: Engine, table_name: str, if_exists: str = 
             with stage_engine.begin() as conn:
                 conn.execute(text(f"TRUNCATE TABLE {full_table}"))
             return
-        else:  # append
+        else:
             logger.debug("Stage table %s exists; appending.", full_table)
             return
 
@@ -364,21 +568,16 @@ def _create_stage_table(stage_engine: Engine, table_name: str, if_exists: str = 
                 {cols_sql}
     );
     """
-    try:
-        with stage_engine.begin() as conn:
-            conn.execute(text(create_sql))
-        logger.info("Created stage table %s", full_table)
-    except SQLAlchemyError as exc:  # pragma: no cover - DDL errors
-        logger.error("Stage table create failed %s: %s", full_table, exc)
-        raise
+    with stage_engine.begin() as conn:
+        conn.execute(text(create_sql))
+    logger.info("Created stage table %s", full_table)
 
 
-# ------------------------------------------------------------------
-# Insert (fast_executemany) helpers
-# ------------------------------------------------------------------
+# =====================================================================================
+# Insert helpers (fast_executemany)
+# =====================================================================================
 
 def _prepare_insert_cursor(stage_engine: Engine, table_name: str, schema: str = 'magnit'):
-    """Return (raw_conn, cursor, insert_sql) with fast_executemany enabled."""
     raw_conn = stage_engine.raw_connection()
     cursor = raw_conn.cursor()
     cursor.fast_executemany = True
@@ -395,158 +594,247 @@ def _insert_chunk(cursor, insert_sql: str, df: pd.DataFrame) -> int:
     cursor.executemany(insert_sql, data)
     return len(data)
 
+DROP_COL_PAT = re.compile(r"^none_\\d+$", re.I)
 
-# ------------------------------------------------------------------
+def _stage_column_list_from_raw(sample_df: pd.DataFrame) -> List[str]:
+    """Return ordered list of columns to materialize in Stage:
+    - preserve raw order
+    - drop technical none_* cols
+    """
+    cols = []
+    for c in sample_df.columns:
+        if DROP_COL_PAT.match(str(c)):
+            continue
+        cols.append(c)
+    return cols
+
+
+_NUMERIC_NAME_HINTS = {
+    'оборот_руб', 'оборот_шт', 'входящая_цена',
+    'quantity_sold', 'sales_amount', 'себестоимсть_в_руб.',
+    'year', 'код', 'код_тт', 'код_тп', 'position_code',
+}
+
+def _mirror_col_sql(col: str) -> str:
+    cl = col.lower()
+    if cl in _NUMERIC_NAME_HINTS:
+        return f'[{col}] DECIMAL(38, 6) NULL'
+    return f'[{col}] NVARCHAR(4000) NULL'
+
+
+def _create_stage_table_mirror(engine, table_name, stage_cols_en, schema='magnit', if_exists='append'):
+    # Определяем типы колонок для создания таблицы
+    col_defs = []
+    for col in stage_cols_en:
+        # Если колонка есть в словаре, ставим FLOAT
+        if col in NUMERIC_COLS:
+            col_defs.append(f"[{col}] FLOAT")
+        else:
+            # Иначе — строковый тип
+            col_defs.append(f"[{col}] NVARCHAR(MAX)")
+    cols_sql = ", ".join(col_defs)
+
+    create_sql = f"""
+    IF OBJECT_ID('{schema}.{table_name}', 'U') IS NULL
+    BEGIN
+        CREATE TABLE [{schema}].[{table_name}] (
+            {cols_sql}
+        )
+    END
+    """
+    with engine.connect() as conn:
+        conn.execute(text(create_sql))
+
+def _norm_numeric_series(s: pd.Series) -> pd.Series:
+    return (
+        s.astype(str)
+         .str.replace(' ', '', regex=False)
+         .str.replace(',', '.', regex=False)
+         .str.replace(r'[^0-9.\\-]', '', regex=True)
+         .replace({'': np.nan})
+         .astype(float)
+    )
+
+def _norm_text_series(s: pd.Series) -> pd.Series:
+    return (
+        s.astype(str)
+         .str.replace(r'[\\x00-\\x1F\\x7F-\\x9F]', '', regex=True)
+         .str.strip()
+         .replace({'nan': None, 'None': None, '': None})
+    )
+
+
+def _apply_basic_cleaning(chunk: pd.DataFrame) -> pd.DataFrame:
+    for col in chunk.columns:
+        cl = col.lower()
+        if cl in _NUMERIC_NAME_HINTS:
+            try:
+                chunk[col] = _norm_numeric_series(chunk[col])
+            except Exception:
+                chunk[col] = pd.to_numeric(chunk[col], errors='coerce')
+        else:
+            chunk[col] = _norm_text_series(chunk[col])
+    return chunk
+
+
+def _prepare_insert_cursor_mirror(stage_engine: Engine, table_name: str, stage_cols: List[str], schema: str = 'magnit'):
+    raw_conn = stage_engine.raw_connection()
+    cursor = raw_conn.cursor()
+    cursor.fast_executemany = True
+    col_list = ', '.join(f'[{c}]' for c in stage_cols)
+    qmarks = ', '.join(['?'] * len(stage_cols))
+    insert_sql = f"INSERT INTO [{schema}].[{table_name}] ({col_list}) VALUES ({qmarks})"
+    return raw_conn, cursor, insert_sql
+
+COLUMN_RENAME_MAP = {
+    'month': 'month',
+    'формат': 'format',
+    'наименование_тт': 'store_name',
+    'код_тт': 'store_code',
+    'адрес_тт': 'store_address',
+    'уровень_1': 'level_1',
+    'уровень_2': 'level_2',
+    'уровень_3': 'level_3',
+    'уровень_4': 'level_4',
+    'поставщик': 'supplier',
+    'бренд': 'brand',
+    'наименование_тп': 'product_name',
+    'код_тп': 'product_code',
+    'шк': 'barcode',
+    'оборот_руб': 'turnover_rub',
+    'оборот_шт': 'turnover_qty',
+    'входящая_цена': 'purchase_price',
+    'load_dt': 'load_dt'
+}
+
+
+
+# =====================================================================================
 # Main convert function
-# ------------------------------------------------------------------
+# =====================================================================================
+import time
+import os
+import tempfile
 
+import time
+import os
+from typing import Optional, Callable
+import pandas as pd
+import tempfile
+from sqlalchemy import text
+import logging
+
+logger = logging.getLogger(__name__)
 def convert_raw_to_stage(
     table_name: str,
     raw_engine: Engine,
     stage_engine: Engine,
     stage_schema: str = 'magnit',
-    if_exists: str = 'append',
-    chunk_size: int = 100_000,
+    chunk_size: int = 50_000,
+    batch_size: int = 10_000,
     limit: Optional[int] = None,
-    progress_cb: Optional[callable] = None,
+    progress_cb: Optional[Callable[[int, float], None]] = None,
 ) -> int:
-    """Transform & load data from RAW.<table_name> into STAGE.<table_name>.
-
-    Parameters
-    ----------
-    table_name : str
-        Source RAW table name (no schema).
-    raw_engine, stage_engine : Engine
-        SQLAlchemy engines.
-    stage_schema : str
-        Destination schema name (default 'magnit').
-    if_exists : {'append','replace_truncate','fail'}
-        Stage table policy.
-    chunk_size : int
-        Rows per fetch from RAW.
-    limit : int | None
-        Optional row cap (debug/testing).
-    progress_cb : callable(rows_loaded:int, seconds:float) | None
-
-    Returns
-    -------
-    int
-        Total rows loaded to STAGE.
     """
-    start_ts = datetime.now().timestamp()
-    logger.info("[Stage] Begin RAW→STAGE for %s", table_name)
+    RAW → STAGE (батчами, executemany, RU→EN):
+      * определяем набор колонок в RAW (skip none_*)
+      * маппим на английские Stage имена
+      * создаём Stage таблицу при необходимости
+      * читаем RAW чанками, чистим, переименовываем
+      * вставляем батчами с fast_executemany
+    """
+    start_ts = time.time()
+    logger.info("[Stage/Mirror] Begin RAW→STAGE for %s", table_name)
 
-    # ------------------------------------------------------------------
-    # Sample RAW to detect layout
-    # ------------------------------------------------------------------
+    # ---- sample RAW ----
     with raw_engine.connect() as raw_conn:
         sample_sql = text(f"SELECT TOP 100 * FROM raw.[{table_name}]")
         sample_df = pd.read_sql(sample_sql, raw_conn)
-    year = _detect_year(sample_df)
-    logger.info("Detected layout year=%s for table %s", year, table_name)
-    act_map = _active_rename_map(sample_df, year)
 
-    # Prepare STAGE target
-    _create_stage_table(stage_engine, table_name, if_exists=if_exists, schema=stage_schema)
+    if sample_df.empty:
+        logger.warning("[Stage/Mirror] RAW.%s empty; nothing to load.", table_name)
+        return 0
 
-    # If STAGE already has rows and append==False we might skip; quick check
-    if if_exists == 'append':
-        with stage_engine.connect() as stage_conn:
-            try:
-                chk = stage_conn.execute(text(f"SELECT TOP 1 1 FROM [{stage_schema}].[{table_name}]")).scalar()
-                if chk:
-                    logger.info("[Stage] Data already present in %s.%s; appending new rows.", stage_schema, table_name)
-            except SQLAlchemyError:
-                pass
+    # Получаем только stage колонки
+    stage_cols_en = _stage_column_list_from_raw(sample_df)
+    logger.info(
+        "[Stage/Mirror] RAW.%s -> %d stage cols (%s...)",
+        table_name, len(stage_cols_en),
+        ', '.join(stage_cols_en[:5]) + ('...' if len(stage_cols_en) > 5 else '')
+    )
 
-    # Build streaming query
-    base_query = f"SELECT * FROM raw.[{table_name}]"
-    if limit is not None:
-        # Use server side TOP to avoid network transfer
-        base_query = f"SELECT TOP {limit} * FROM raw.[{table_name}]"
+    # ---- ensure Stage table ----
+    _create_stage_table_mirror(
+        stage_engine,
+        table_name,
+        stage_cols_en,
+        schema=stage_schema,
+        if_exists='append'
+    )
+
+    # ---- prepare INSERT ----
+    placeholders = ', '.join(['?'] * len(stage_cols_en))
+    cols_escaped = ', '.join(f'[{c}]' for c in stage_cols_en)
+    insert_sql = f"INSERT INTO [{stage_schema}].[{table_name}] ({cols_escaped}) VALUES ({placeholders})"
 
     total_rows = 0
-
-    # Prepare insert cursor once
-    raw_stage_conn, stage_cursor, insert_sql = _prepare_insert_cursor(stage_engine, table_name, schema=stage_schema)
-
     try:
         with raw_engine.connect().execution_options(stream_results=True) as raw_conn:
-            for chunk in pd.read_sql(text(base_query), raw_conn, chunksize=chunk_size):
-                # Transform ---------------------------------------------------
-                # Normalize column cases to exactly as in sample for map lookup
-                cols_lower = {c.lower(): c for c in chunk.columns}
-                # Rename RU→EN
-                rename_dict = {src: tgt for src, tgt in act_map.items() if src in chunk.columns}
-                if rename_dict:
-                    chunk.rename(columns=rename_dict, inplace=True)
-                # Standard text cleanup for new EN cols
-                for c in list(rename_dict.values()):
-                    if c in chunk.columns:
-                        chunk[c] = _clean_text(chunk[c])
-                # Numeric conversions (if RU leftover metrics also present)
-                # First map RU metrics to EN if they didn't exist in sample (defensive)
-                for ru, en in ColumnConfig.RENAME_MAP_2025.items():  # superset
-                    if ru in chunk.columns and en not in chunk.columns:
-                        chunk[en] = chunk[ru]
-                # Now parse numerics
-                for c in ColumnConfig.NUMERIC_COLS:
-                    if c in chunk.columns:
-                        chunk[c] = _parse_float(chunk[c]).fillna(ColumnConfig.NUMERIC_COLS[c]['default'])
-                # Drop raw RU columns we don't need
-                drop_cols = [c for c in chunk.columns if c not in CANON_STAGE_SET]
-                if drop_cols:
-                    chunk.drop(columns=drop_cols, inplace=True, errors='ignore')
-                # Derive dates
-                chunk = _derive_date_fields(chunk, year)
-                # Ensure all stage cols present
-                for c in CANON_STAGE_COLS:
-                    if c not in chunk.columns:
-                        if c in ColumnConfig.NUMERIC_COLS:
-                            chunk[c] = ColumnConfig.NUMERIC_COLS[c]['default']
-                        else:
-                            chunk[c] = '' if c not in ('sales_date','sales_month') else None
-                # Reorder & cast ------------------------------------------------
-                chunk = chunk[CANON_STAGE_COLS]
-                # Cast numerics to python float (avoid Decimal mismatch)
-                for c in ColumnConfig.NUMERIC_COLS:
-                    chunk[c] = chunk[c].astype('float64')
-                # Insert -------------------------------------------------------
-                inserted = _insert_chunk(stage_cursor, insert_sql, chunk)
-                total_rows += inserted
-                if total_rows and progress_cb:
-                    try:
-                        progress_cb(total_rows, datetime.now().timestamp() - start_ts)
-                    except Exception:  # pragma: no cover
-                        pass
-                if total_rows % (chunk_size * 5) == 0:  # periodic commit
-                    raw_stage_conn.commit()
-        # final commit
-        raw_stage_conn.commit()
-    finally:
-        try:
-            stage_cursor.close()
-        except Exception:  # pragma: no cover - close best effort
-            pass
-        try:
-            raw_stage_conn.close()
-        except Exception:  # pragma: no cover
-            pass
+            raw_stage_conn = stage_engine.raw_connection()
+            cursor = raw_stage_conn.cursor()
+            cursor.fast_executemany = True
 
-    dur = datetime.now().timestamp() - start_ts
-    logger.info("[Stage] Loaded %s rows from RAW.%s into %s.%s in %.1fs (%.0f rows/s)",
-                total_rows, table_name, stage_schema, table_name, dur, total_rows / dur if dur else 0)
+            base_query = f"SELECT * FROM raw.[{table_name}]"
+            if limit is not None:
+                base_query = f"SELECT TOP {limit} * FROM raw.[{table_name}]"
+
+            for chunk in pd.read_sql(text(base_query), raw_conn, chunksize=chunk_size):
+                if chunk.empty:
+                    continue
+
+                # чистка и переименование колонок
+                chunk = _apply_basic_cleaning_stage(chunk, list(sample_df.columns), stage_cols_en)
+                chunk = _convert_numeric_cols(chunk)
+                # батчи вставки
+                data_tuples = list(chunk.itertuples(index=False, name=None))
+                for i in range(0, len(data_tuples), batch_size):
+                    batch = data_tuples[i:i + batch_size]
+                    cursor.executemany(insert_sql, batch)
+                    raw_stage_conn.commit()
+
+                total_rows += len(chunk)
+                logger.info("[Stage/Mirror] Inserted %d rows (cumulative %d).", len(chunk), total_rows)
+
+                if progress_cb:
+                    try:
+                        progress_cb(total_rows, time.time() - start_ts)
+                    except Exception:
+                        pass
+
+            cursor.close()
+            raw_stage_conn.close()
+
+    except Exception as e:
+        logger.exception("[Stage/Mirror] Error while inserting data: %s", e)
+        raise
+
+    dur = time.time() - start_ts
+    rps = total_rows / dur if dur else 0
+    logger.info(
+        "[Stage/Mirror] Loaded %s rows RAW.%s -> %s.%s in %.1fs (%.0f rows/s)",
+        total_rows, table_name, stage_schema, table_name, dur, rps
+    )
     return total_rows
 
 
-# ------------------------------------------------------------------
-# CLI test harness (optional)
-# ------------------------------------------------------------------
+# =====================================================================================
+# CLI harness
+# =====================================================================================
 if __name__ == "__main__":  # pragma: no cover
     import argparse
     from sqlalchemy import create_engine
 
-    parser = argparse.ArgumentParser(description="RAW→STAGE loader for Magnit")
+    parser = argparse.ArgumentParser(description="RAW→STAGE loader for Magnit (optimized)")
     parser.add_argument("--raw", required=True, help="SQLAlchemy URL to RAW DB")
     parser.add_argument("--stage", required=True, help="SQLAlchemy URL to STAGE DB")
     parser.add_argument("table", help="RAW table name")
