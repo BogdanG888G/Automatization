@@ -258,44 +258,44 @@ class PyaterochkaTableProcessor:
 
     @classmethod
     def bulk_insert_pyaterochka(cls, df: pd.DataFrame, table_name: str, engine: Engine):
-        """Массовая вставка данных (все значения как строки)"""
+        """Массовая вставка данных (оптимизировано для 1 млн строк)"""
         @event.listens_for(engine, 'before_cursor_execute')
         def set_fast_executemany(conn, cursor, statement, parameters, context, executemany):
             if executemany:
                 cursor.fast_executemany = True
 
-        # Подготовка данных - все значения как строки
-        data = []
-        for row in df.itertuples(index=False, name=None):
-            clean_row = []
-            for value in row:
-                if pd.isna(value) or value in ('', None):
-                    clean_row.append('')
-                else:
-                    val_str = str(value).strip()
-                    clean_row.append(val_str[:1000] if len(val_str) > 1000 else val_str)
-            data.append(tuple(clean_row))
+        # Подготовка SQL
+        cols = ', '.join(f'[{col}]' for col in df.columns)
+        params = ', '.join(['?'] * len(df.columns))
+        insert_sql = f"INSERT INTO raw.{table_name} ({cols}) VALUES ({params})"
+
+        def row_generator():
+            """Генератор строк без сохранения в памяти"""
+            for row in df.itertuples(index=False, name=None):
+                clean_row = [
+                    '' if pd.isna(value) or value in ('', None)
+                    else str(value).strip()[:1000]
+                    for value in row
+                ]
+                yield tuple(clean_row)
 
         # Вставка батчами
         with closing(engine.raw_connection()) as conn:
-            with conn.cursor() as cursor:
-                cols = ', '.join(f'[{col}]' for col in df.columns)
-                params = ', '.join(['?'] * len(df.columns))
-                insert_sql = f"INSERT INTO raw.{table_name} ({cols}) VALUES ({params})"
-                
-                # Логируем первый ряд для отладки
-                logger.debug(f"Пример данных для вставки: {data[0]}")
-                
-                for i in range(0, len(data), cls.BATCH_SIZE):
-                    batch = data[i:i + cls.BATCH_SIZE]
-                    try:
-                        cursor.executemany(insert_sql, batch)
-                        conn.commit()
-                        logger.debug(f"Успешно вставлено {len(batch)} записей")
-                    except Exception as e:
-                        logger.error(f"Ошибка вставки батча [{i}:{i+len(batch)}]. Первая строка батча: {batch[0]}. Ошибка: {e}")
-                        conn.rollback()
-                        raise   
+            cursor = conn.cursor()
+            batch = []
+            count = 0
+            for row in row_generator():
+                batch.append(row)
+                if len(batch) >= cls.BATCH_SIZE:
+                    cursor.executemany(insert_sql, batch)
+                    conn.commit()
+                    count += len(batch)
+                    logger.debug(f"Вставлено {count} записей...")
+                    batch.clear()
+            if batch:
+                cursor.executemany(insert_sql, batch)
+                conn.commit()
+                logger.debug(f"Финальные {len(batch)} записей вставлены.")
 
 def create_pyaterochka_table_and_upload(file_path: str, engine: Engine) -> str:
     """Интерфейсная функция для вызова из DAG"""

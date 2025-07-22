@@ -25,8 +25,8 @@ DEFAULT_CONN_STAGE = (
 
 class PyaterochkaConfig:
     MAX_CONCURRENT_TASKS = 4
-    MAX_FILES_PER_RUN = 8
-    TASK_TIMEOUT = timedelta(minutes=45)
+    MAX_FILES_PER_RUN = 4
+    TASK_TIMEOUT = timedelta(minutes=60)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
 
     DATA_DIR = "/opt/airflow/data"
@@ -289,7 +289,7 @@ def process_pyaterochka_file(file_path: str):
                 raw_engine=engine_test,
                 stage_engine=engine_stage,
                 stage_schema=PyaterochkaConfig.STAGE_SCHEMA,
-                limit = 10000
+                limit = None
             )
             logging.info("Pyaterochka data loaded to stage")
         except exc.SQLAlchemyError as e:
