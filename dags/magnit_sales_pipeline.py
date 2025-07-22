@@ -24,7 +24,7 @@ DEFAULT_CONN_STAGE = (
 )
 
 class MagnitConfig:
-    MAX_CONCURRENT_TASKS = 1
+    MAX_CONCURRENT_TASKS = 2
     MAX_FILES_PER_RUN = 4
     TASK_TIMEOUT = timedelta(minutes=120)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
@@ -122,6 +122,8 @@ def preprocess_magnit_file(file_path: str) -> str:
     except Exception as e:
         logging.error(f"File preprocessing error: {str(e)}")
         return file_path
+
+
 
 def read_magnit_file(file_path: str, max_rows: Optional[int] = None) -> Optional[pd.DataFrame]:
     """Read Magnit file with optional row limit"""
