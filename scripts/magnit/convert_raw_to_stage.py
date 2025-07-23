@@ -272,6 +272,42 @@ def _text_from_floatish(s: pd.Series) -> pd.Series:
     x = x.where(~x.str.fullmatch(_FLOATISH_RE), x.str.replace(r'\.0+$', '', regex=True))
     return x.replace({'nan': None, 'None': None, '': None})
 
+RAW_TO_STAGE_MAP = {
+    'month': 'month',
+    'формат': 'format',
+    'наименование_тт': 'store_name',
+    'код_тт': 'store_id',
+    'адрес_тт': 'store_address',
+    'уровень_1': 'level_1',
+    'уровень_2': 'level_2',
+    'уровень_3': 'level_3',
+    'уровень_4': 'level_4',
+    'поставщик': 'supplier',
+    'бренд': 'brand',
+    'наименование_тп': 'product_name',
+    'код_тп': 'product_id',
+    'шк': 'barcode',
+    'оборот_руб': 'revenue_rub',
+    'оборот_шт': 'revenue_qty',
+    'входящая_цена': 'purchase_price'
+}
+
+def _map_raw_columns(raw_df: pd.DataFrame) -> List[str]:
+    """Преобразует колонки RAW → Stage на английский"""
+    mapped = []
+    for col in raw_df.columns:
+        col_lower = col.lower()
+        if col_lower in RAW_TO_STAGE_MAP:
+            mapped.append(RAW_TO_STAGE_MAP[col_lower])
+        else:
+            mapped.append(col_lower)  # fallback
+    return mapped
+
+def _infer_sql_type(series: pd.Series) -> str:
+    """Определяет SQL тип колонки"""
+    if pd.api.types.is_numeric_dtype(series):
+        return "DECIMAL(18,3)"
+    return "NVARCHAR(255)"
 
 def _stage_column_list_from_raw(sample_df: pd.DataFrame) -> list[str]:
     """
@@ -307,41 +343,40 @@ def _mirror_col_sql_en(col: str) -> str:
     if cl in STAGE_ID_LIKE_TEXT or cl.endswith('_code'):
         return f'[{col}] NVARCHAR(255) NULL'
     # адреса и произвольный текст
-    return f'[{col}] NVARCHAR(4000) NULL'
+    return f'[{col}] NVARCHAR(255) NULL'
 
+def _create_stage_table_mirror(stage_engine, table_name, stage_cols, sample_df=None, schema='magnit'):
+    """
+    Создает Stage таблицу. Если sample_df не задан, используется FLOAT/NVARCHAR(255).
+    """
+    columns_sql = []
+    if sample_df is not None:
+        for c, raw_c in zip(stage_cols, sample_df.columns):
+            sql_type = _infer_sql_type(sample_df[raw_c])
+            columns_sql.append(f"[{c}] {sql_type} NOT NULL")
+    else:
+        for col in stage_cols:
+            sql_type = "FLOAT" if col in NUMERIC_COLS else "NVARCHAR(255)"
+            columns_sql.append(f"[{col}] {sql_type} NOT NULL")
 
-def _create_stage_table_mirror(
-    stage_engine: Engine,
-    table_name: str,
-    stage_cols_en: list[str],
-    schema: str = 'magnit',
-    if_exists: str = 'append',
-) -> None:
-    insp = inspect(stage_engine)
-    exists = insp.has_table(table_name, schema=schema)
-    full_table = f"[{schema}].[{table_name}]"
-
-    if exists:
-        if if_exists == 'fail':
-            raise RuntimeError(f"Stage table {full_table} already exists.")
-        elif if_exists == 'replace_truncate':
-            logger.info("Truncating existing stage table %s", full_table)
-            with stage_engine.begin() as conn:
-                conn.execute(text(f"TRUNCATE TABLE {full_table}"))
-        else:
-            logger.debug("Stage table %s exists; appending.", full_table)
-        return
-
-    cols_sql = ',\n    '.join(_mirror_col_sql_en(c) for c in stage_cols_en)
     create_sql = f"""
-    CREATE TABLE {full_table} (
-        {cols_sql},
-        load_dt DATETIME DEFAULT GETDATE()
-    );
+    IF OBJECT_ID('{schema}.{table_name}', 'U') IS NULL
+    CREATE TABLE [{schema}].[{table_name}] (
+        {', '.join(columns_sql)}
+    )
     """
     with stage_engine.begin() as conn:
         conn.execute(text(create_sql))
-    logger.info("Created Stage table %s (%d cols).", full_table, len(stage_cols_en))
+
+
+def _fill_nulls(df: pd.DataFrame) -> pd.DataFrame:
+    """Заполняет NaN для всех типов"""
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].fillna(0)
+        else:
+            df[col] = df[col].fillna('')
+    return df
 
 
 def _apply_basic_cleaning_stage(chunk: pd.DataFrame, raw_cols: list[str], stage_cols_en: list[str]) -> pd.DataFrame:
@@ -622,29 +657,6 @@ def _mirror_col_sql(col: str) -> str:
     return f'[{col}] NVARCHAR(4000) NULL'
 
 
-def _create_stage_table_mirror(engine, table_name, stage_cols_en, schema='magnit', if_exists='append'):
-    # Определяем типы колонок для создания таблицы
-    col_defs = []
-    for col in stage_cols_en:
-        # Если колонка есть в словаре, ставим FLOAT
-        if col in NUMERIC_COLS:
-            col_defs.append(f"[{col}] FLOAT")
-        else:
-            # Иначе — строковый тип
-            col_defs.append(f"[{col}] NVARCHAR(MAX)")
-    cols_sql = ", ".join(col_defs)
-
-    create_sql = f"""
-    IF OBJECT_ID('{schema}.{table_name}', 'U') IS NULL
-    BEGIN
-        CREATE TABLE [{schema}].[{table_name}] (
-            {cols_sql}
-        )
-    END
-    """
-    with engine.connect() as conn:
-        conn.execute(text(create_sql))
-
 def _norm_numeric_series(s: pd.Series) -> pd.Series:
     return (
         s.astype(str)
@@ -725,6 +737,24 @@ from sqlalchemy import text
 import logging
 
 logger = logging.getLogger(__name__)
+
+def _sanitize_batch(batch):
+    fixed_batch = []
+    for row in batch:
+        fixed_row = []
+        for val in row:
+            if isinstance(val, str):
+                v = val.strip()
+                # Пытаемся конвертнуть в число
+                if v.replace('.', '', 1).isdigit():
+                    fixed_row.append(float(v) if '.' in v else int(v))
+                else:
+                    fixed_row.append(None)  # или 0, если нужно
+            else:
+                fixed_row.append(val)
+        fixed_batch.append(tuple(fixed_row))
+    return fixed_batch
+
 def convert_raw_to_stage(
     table_name: str,
     raw_engine: Engine,
@@ -735,18 +765,9 @@ def convert_raw_to_stage(
     limit: Optional[int] = None,
     progress_cb: Optional[Callable[[int, float], None]] = None,
 ) -> int:
-    """
-    RAW → STAGE (батчами, executemany, RU→EN):
-      * определяем набор колонок в RAW (skip none_*)
-      * маппим на английские Stage имена
-      * создаём Stage таблицу при необходимости
-      * читаем RAW чанками, чистим, переименовываем
-      * вставляем батчами с fast_executemany
-    """
     start_ts = time.time()
     logger.info("[Stage/Mirror] Begin RAW→STAGE for %s", table_name)
 
-    # ---- sample RAW ----
     with raw_engine.connect() as raw_conn:
         sample_sql = text(f"SELECT TOP 100 * FROM raw.[{table_name}]")
         sample_df = pd.read_sql(sample_sql, raw_conn)
@@ -755,75 +776,55 @@ def convert_raw_to_stage(
         logger.warning("[Stage/Mirror] RAW.%s empty; nothing to load.", table_name)
         return 0
 
-    # Получаем только stage колонки
-    stage_cols_en = _stage_column_list_from_raw(sample_df)
-    logger.info(
-        "[Stage/Mirror] RAW.%s -> %d stage cols (%s...)",
-        table_name, len(stage_cols_en),
-        ', '.join(stage_cols_en[:5]) + ('...' if len(stage_cols_en) > 5 else '')
-    )
+    # Маппинг колонок
+    stage_cols_en = _map_raw_columns(sample_df)
+    logger.info("[Stage/Mirror] RAW.%s -> Stage cols: %s", table_name, ', '.join(stage_cols_en))
 
-    # ---- ensure Stage table ----
-    _create_stage_table_mirror(
-        stage_engine,
-        table_name,
-        stage_cols_en,
-        schema=stage_schema,
-        if_exists='append'
-    )
+    # Создаём Stage таблицу
+    _create_stage_table_mirror(stage_engine, table_name, stage_cols_en, sample_df, schema=stage_schema)
 
-    # ---- prepare INSERT ----
     placeholders = ', '.join(['?'] * len(stage_cols_en))
     cols_escaped = ', '.join(f'[{c}]' for c in stage_cols_en)
     insert_sql = f"INSERT INTO [{stage_schema}].[{table_name}] ({cols_escaped}) VALUES ({placeholders})"
 
     total_rows = 0
-    try:
-        with raw_engine.connect().execution_options(stream_results=True) as raw_conn:
-            raw_stage_conn = stage_engine.raw_connection()
-            cursor = raw_stage_conn.cursor()
-            cursor.fast_executemany = True
+    with raw_engine.connect().execution_options(stream_results=True) as raw_conn:
+        raw_stage_conn = stage_engine.raw_connection()
+        cursor = raw_stage_conn.cursor()
+        cursor.fast_executemany = True
 
-            base_query = f"SELECT * FROM raw.[{table_name}]"
-            if limit is not None:
-                base_query = f"SELECT TOP {limit} * FROM raw.[{table_name}]"
+        base_query = f"SELECT * FROM raw.[{table_name}]"
+        if limit is not None:
+            base_query = f"SELECT TOP {limit} * FROM raw.[{table_name}]"
 
-            for chunk in pd.read_sql(text(base_query), raw_conn, chunksize=chunk_size):
-                if chunk.empty:
-                    continue
+        for chunk in pd.read_sql(text(base_query), raw_conn, chunksize=chunk_size):
+            if chunk.empty:
+                continue
 
-                # чистка и переименование колонок
-                chunk = _apply_basic_cleaning_stage(chunk, list(sample_df.columns), stage_cols_en)
-                chunk = _convert_numeric_cols(chunk)
-                # батчи вставки
-                data_tuples = list(chunk.itertuples(index=False, name=None))
-                for i in range(0, len(data_tuples), batch_size):
-                    batch = data_tuples[i:i + batch_size]
-                    cursor.executemany(insert_sql, batch)
-                    raw_stage_conn.commit()
+            chunk.columns = stage_cols_en
+            chunk = _fill_nulls(chunk)
+            chunk = _convert_numeric_cols(chunk)  # оставить, если есть кастомная логика
+            data_tuples = list(chunk.itertuples(index=False, name=None))
 
-                total_rows += len(chunk)
-                logger.info("[Stage/Mirror] Inserted %d rows (cumulative %d).", len(chunk), total_rows)
+            for i in range(0, len(data_tuples), batch_size):
+                batch = data_tuples[i:i + batch_size]
+                cursor.executemany(insert_sql, batch)
+                raw_stage_conn.commit()
 
-                if progress_cb:
-                    try:
-                        progress_cb(total_rows, time.time() - start_ts)
-                    except Exception:
-                        pass
+            total_rows += len(chunk)
+            logger.info("[Stage/Mirror] Inserted %d rows (cumulative %d).", len(chunk), total_rows)
 
-            cursor.close()
-            raw_stage_conn.close()
+            if progress_cb:
+                try:
+                    progress_cb(total_rows, time.time() - start_ts)
+                except Exception:
+                    pass
 
-    except Exception as e:
-        logger.exception("[Stage/Mirror] Error while inserting data: %s", e)
-        raise
+        cursor.close()
+        raw_stage_conn.close()
 
     dur = time.time() - start_ts
-    rps = total_rows / dur if dur else 0
-    logger.info(
-        "[Stage/Mirror] Loaded %s rows RAW.%s -> %s.%s in %.1fs (%.0f rows/s)",
-        total_rows, table_name, stage_schema, table_name, dur, rps
-    )
+    logger.info("[Stage/Mirror] Loaded %s rows RAW.%s -> %s.%s in %.1fs", total_rows, table_name, stage_schema, table_name, dur)
     return total_rows
 
 
