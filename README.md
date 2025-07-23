@@ -1,152 +1,341 @@
-#TODO подправить readme.md!
-
 # Автоматизация загрузки данных в SQL Server с помощью Apache Airflow
 
 ![Apache Airflow](https://img.shields.io/badge/Apache%20Airflow-017CEE?style=for-the-badge&logo=Apache%20Airflow&logoColor=white)
-
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-
 ![SQL Server](https://img.shields.io/badge/Microsoft%20SQL%20Server-CC2927?style=for-the-badge&logo=microsoft%20sql%20server&logoColor=white)
 
-Этот проект автоматизирует процесс загрузки данных из CSV/XLSX файлов в Microsoft SQL Server с использованием Apache Airflow. Система включает в себя:
+Проект автоматизирует процесс загрузки данных из CSV/XLSX/XLSB файлов в Microsoft SQL Server с использованием Apache Airflow. Решение обеспечивает сквозную обработку данных от обнаружения файлов до архивирования с поддержкой структурирования данных для различных розничных сетей
 
-- Автоматическое обнаружение новых файлов
-- Конвертацию XLSX в CSV
-- Создание таблиц в базе данных
-- Загрузку данных в SQL Server
-- Вызов хранимых процедур для обработки данных
-- Архивирование обработанных файлов
+## 🌟 Ключевые особенности
+- Автоматическое обнаружение новых файлов в директории
+- Конвертация XLSX → CSV
+- Динамическое создание таблиц в SQL Server
+- Пакетная загрузка данных
+- Динамичная обработка данных
+- Интегрированное архивирование
+- Поддержка мультисетевой структуры данных
+- Управление через Docker-контейнеры
 
 ## 📦 Требования
-
-- Docker Desktop
-- Docker Compose
-- Microsoft SQL Server
+- Docker Desktop 20.10+
+- Docker Compose 2.0+
+- Microsoft SQL Server 2019+
+- 4 ГБ свободной оперативной памяти
 
 ## 🚀 Быстрый старт
-
 1. **Клонируйте репозиторий:**
-   ```bash
-   git clone https://github.com/BogdanG888G/Automatization.git
-   cd airflow-data-pipeline
-   ```
+```bash
+git clone https://github.com/BogdanG888G/Automatization.git
+cd airflow-data-pipeline
+```
 
 2. **Настройте окружение:**
-   - Создайте `.env` файл (пример в `.env.example`)
-   - Настройте подключение к MSSQL в Airflow Variables (Admin → Variables)
+```bash
+cp .env.example .env
+# Отредактируйте .env файл под вашу конфигурацию
+```
 
 3. **Запустите проект:**
-   ```bash
-   docker-compose up -d --build
-   ```
+```bash
+docker-compose up -d --build
+```
 
-4. **Откройте Airflow UI:**
-   ```
-   http://localhost:8080
-   ```
-   Логин: `airflow`  
-   Пароль: `airflow`
+4. **Доступ к Airflow UI:**
+```
+http://localhost:8080
+```
+Логин: `airflow`  
+Пароль: `airflow`
 
 5. **Поместите файлы для обработки:**
-   Скопируйте CSV/XLSX файлы в папку `./data`
+```bash
+# Пример для Magnit
+cp ваш_файл.csv ./data/magnit_december_2024.csv
+```
 
 ## 🗂 Структура проекта
-
 ```
-├── dags/                   # Airflow DAGs
+AUTOMATIZATION/
+├── archive/                  # Архив обработанных файлов
+├── data/                     # Входные данные
+├── dags/                     # Индивидуальные DAG для каждой сети
+│   ├── ashan_sales_pipeline.py
+│   ├── diksi_sales_pipeline.py
+│   ├── magnit_sales_pipeline.py
+│   ├── okey_sales_pipeline.py
+│   ├── perekrestok_sales_pipeline.py
+│   ├── pyaterochka_sales_pipeline.py
 │   └── x5_sales_pipeline.py
-├── scripts/                # Вспомогательные скрипты
-│   ├── utils.py
-│   ├── convert_xlsx_to_csv.py
-│   ├── create_table_and_upload.py
-│   └── call_stored_procedure.py
-├── data/                   # Входные данные (автоматически обрабатываются)
-├── archive/                # Архив обработанных файлов
-├── docker-compose.yml      # Docker Compose конфигурация
-├── Dockerfile              # Кастомный образ Airflow
-├── requirements.txt        # Зависимости Python
-├── entrypoint.sh           # Скрипт инициализации
+├── scripts/                  # Сетевые специфичные скрипты
+│   ├── ashan/
+│   │   ├── convert_raw_to_stage.py
+│   │   └── create_table_and_upload.py
+│   ├── diksi/
+│   │   ├── convert_raw_to_stage.py
+│   │   └── create_table_and_upload.py
+│   ├── magnit/
+│   │   ├── convert_raw_to_stage.py
+│   │   └── create_table_and_upload.py
+│   ├── okey/
+│   │   ├── convert_raw_to_stage.py
+│   │   └── create_table_and_upload.py
+│   ├── perekrestok/
+│   │   ├── convert_raw_to_stage.py
+│   │   └── create_table_and_upload.py
+│   ├── pyaterochka/
+│   │   ├── convert_raw_to_stage.py
+│   │   └── create_table_and_upload.py
+│   └── x5/
+│   │   ├── convert_raw_to_stage.py
+│   │   └── create_table_and_upload.py
+│   └── common/
+│   │   ├── convert_xlsx_to_csv.py
+│   │   └── utils.py                # Общие утилиты
+├── .dockerignore
+├── .env                      # Переменные окружения
+├── .gitignore
+├── docker-compose.yml
+├── config.py
+├── Dockerfile
+├── requirements.txt
+├── TODO.md
+├── entrypoint.sh
 └── README.md
 ```
 
 ## ⚙️ Настройка подключения к MSSQL
-
-1. В Airflow UI перейдите в **Admin → Variables**
+1. В Airflow UI: **Admin → Variables**
 2. Создайте переменную:
    - **Key**: `MSSQL_CONN_STR`
-   - **Value**: 
-     ```
-     mssql+pyodbc://<username>:<password>@<server>/<database>?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes
-     ```
+   - **Value**:
+```
+mssql+pyodbc://<user>:<password>@<host>/<database>?driver=ODBC+Driver+17+for+SQL+Server
+```
 
 Пример для Windows:
 ```
-mssql+pyodbc://sales_user:123@host.docker.internal/MSSQLSERVER01/Test?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes
+mssql+pyodbc://airflow_agent:Pass123@host.docker.internal/SalesDB?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes
 ```
 
 ## 🔧 Конфигурация DAG
-
-Основной DAG (`x5_sales_pipeline.py`) настроен со следующими параметрами:
-
+Основной DAG настроен с параметрами:
 ```python
 with DAG(
-    dag_id="x5_sales_pipeline",
-    start_date=datetime(2025, 7, 7),
+    dag_id="retail_data_pipeline",
+    start_date=datetime(2025, 1, 1),
     schedule_interval="@daily",  # Ежедневный запуск
-    catchup=False,               # Отключить дозапуск
-    tags=["x5", "sales"],
+    catchup=False,
+    tags=["retail", "data_processing"],
 ) as dag:
 ```
 
-## 📊 Пример файла данных
+## 📊 Форматы данных для розничных сетей
 
-Файлы должны иметь следующий формат имени:
-```
-<сеть>_<месяц>_<год>.csv
+### 🛒 Magnit
+```sql
+CREATE TABLE [Stage].[magnit].[magnit_<месяц>_<год>] (
+    [month] NVARCHAR(50),
+    [format] NVARCHAR(50),
+    [store_name] NVARCHAR(255),
+    [store_id] INT,
+    [store_address] NVARCHAR(500),
+    [level_1] NVARCHAR(255),
+    [level_2] NVARCHAR(255),
+    [level_3] NVARCHAR(255),
+    [level_4] NVARCHAR(255),
+    [supplier] NVARCHAR(255),
+    [brand] NVARCHAR(255),
+    [product_name] NVARCHAR(255),
+    [product_id] NVARCHAR(50),
+    [barcode] NVARCHAR(50),
+    [revenue_rub] DECIMAL(18,2),
+    [revenue_qty] INT,
+    [purchase_price] DECIMAL(18,2)
 ```
 
-Пример:
-```
-x5_january_2025.csv
+### 🛒 Ashan
+```sql
+CREATE TABLE [Stage].[ashan].[ashan_<месяц>_<год>] (
+    [date_raw] DATE,
+    [product_name] NVARCHAR(255),
+    [store] NVARCHAR(255),
+    [city] NVARCHAR(100),
+    [address] NVARCHAR(500),
+    [month_raw] NVARCHAR(50),
+    [ср_цена_продажи] DECIMAL(18,2),
+    [списания_руб] DECIMAL(18,2),
+    [списания_шт] INT,
+    [продажи_c_ндс] DECIMAL(18,2),
+    [продажи_шт] INT,
+    [ср_цена_покупки] DECIMAL(18,2),
+    [маржа_руб] DECIMAL(18,2),
+    [потери_руб] DECIMAL(18,2),
+    [потери_шт] INT,
+    [промо_продажи_c_ндс] DECIMAL(18,2),
+    [sale_month] INT,
+    [sale_year] INT,
+    [sale_date] DATE,
+    [product_segment] NVARCHAR(100),
+    [product_family_code] NVARCHAR(50),
+    [product_family_name] NVARCHAR(255),
+    [product_article] NVARCHAR(50),
+    [supplier_code] NVARCHAR(50),
+    [supplier_name] NVARCHAR(255),
+    [store_format] NVARCHAR(50)
 ```
 
-Структура CSV:
-```csv
-store_id;product_id;quantity;price
-1001;P001;150;29.99
-1002;P002;200;49.99
-...
+### 🛒 Diksi
+```sql
+CREATE TABLE [Stage].[diksi].[diksi_<месяц>_<год>] (
+    [sale_year] INT,
+    [sale_month] INT,
+    [level_3] NVARCHAR(255),
+    [level_4] NVARCHAR(255),
+    [level_5] NVARCHAR(255),
+    [vtm] NVARCHAR(255),
+    [product] NVARCHAR(255),
+    [address] NVARCHAR(500),
+    [product_code] NVARCHAR(50),
+    [stores] NVARCHAR(255),
+    [quantity_first_week] INT,
+    [cost_with_vat_first_week] DECIMAL(18,2),
+    [amount_with_vat_first_week] DECIMAL(18,2),
+    [quantity_second_week] INT,
+    [cost_with_vat_second_week] DECIMAL(18,2),
+    [amount_with_vat_second_week] DECIMAL(18,2),
+    [quantity_third_week] INT,
+    [cost_with_vat_third_week] DECIMAL(18,2),
+    [amount_with_vat_third_week] DECIMAL(18,2),
+    [quantity_fourth_week] INT,
+    [cost_with_vat_fourth_week] DECIMAL(18,2),
+    [amount_with_vat_fourth_week] DECIMAL(18,2),
+    [quantity_fifth_week] INT,
+    [cost_with_vat_fifth_week] DECIMAL(18,2),
+    [amount_with_vat_fifth_week] DECIMAL(18,2),
+    [quantity_summary] INT,
+    [cost_with_vat_summary] DECIMAL(18,2),
+    [amount_with_vat_summary] DECIMAL(18,2)
+```
+
+### 🛒 Okey
+```sql
+CREATE TABLE [Stage].[okey].[okey_<месяц>_<год>] (
+    [retail_chain] NVARCHAR(50),
+    [product_category] NVARCHAR(255),
+    [product_type] NVARCHAR(255),
+    [supplier_name] NVARCHAR(255),
+    [brand] NVARCHAR(255),
+    [product_name] NVARCHAR(255),
+    [product_unified_name] NVARCHAR(255),
+    [product_weight_g] INT,
+    [product_flavor] NVARCHAR(100),
+    [sales_quantity] INT,
+    [sales_amount_rub] DECIMAL(18,2),
+    [sales_weight_kg] DECIMAL(18,3),
+    [cost_price_rub] DECIMAL(18,2),
+    [sales_month] INT,
+    [load_dt] DATETIME
+```
+
+### 🛒 Pereкrestok
+```sql
+CREATE TABLE [Stage].[perekrestok].[perekrestok_<месяц>_<год>] (
+    [period] DATE,
+    [retail_chain] NVARCHAR(50),
+    [category] NVARCHAR(255),
+    [supplier] NVARCHAR(255),
+    [brand] NVARCHAR(255),
+    [product_name] NVARCHAR(255),
+    [weight_g] INT,
+    [flavor] NVARCHAR(100),
+    [sale_year] INT,
+    [sale_month] INT,
+    [cost_rub] DECIMAL(18,2),
+    [sales_qty] INT,
+    [sales_rub] DECIMAL(18,2),
+    [sales_tons] DECIMAL(18,3),
+    [category_lvl2] NVARCHAR(255),
+    [product_name_uni] NVARCHAR(255)
+```
+
+### 🛒 Pyaterochka
+```sql
+CREATE TABLE [Stage].[pyaterochka].[pyaterochka_<месяц>_<год>] (
+    [retail_chain] NVARCHAR(50),
+    [brand] NVARCHAR(255),
+    [product_name] NVARCHAR(255),
+    [sales_quantity] INT,
+    [sales_amount_rub] DECIMAL(18,2),
+    [sales_weight_kg] DECIMAL(18,3),
+    [cost_price_rub] DECIMAL(18,2),
+    [sales_month] INT,
+    [product_category] NVARCHAR(255),
+    [product_type] NVARCHAR(255),
+    [supplier_name] NVARCHAR(255),
+    [product_unified_name] NVARCHAR(255),
+    [product_weight_g] INT,
+    [product_flavor] NVARCHAR(100),
+    [load_dt] DATETIME
+```
+
+### 🛒 X5 Retail Group
+```sql
+CREATE TABLE [Stage].[x5].[x5_<месяц>_<год>] (
+    [retail_chain] NVARCHAR(50),
+    [branch] NVARCHAR(255),
+    [region] NVARCHAR(100),
+    [city] NVARCHAR(100),
+    [address] NVARCHAR(500),
+    [factory] NVARCHAR(255),
+    [factory_2] NVARCHAR(255),
+    [prod_level_2] NVARCHAR(255),
+    [prod_level_3] NVARCHAR(255),
+    [prod_level_4] NVARCHAR(255),
+    [material] NVARCHAR(255),
+    [material_2] NVARCHAR(255),
+    [brand] NVARCHAR(255),
+    [vendor] NVARCHAR(255),
+    [main_supplier] NVARCHAR(255),
+    [warehouse_supplier] NVARCHAR(255),
+    [quantity] INT,
+    [gross_turnover] DECIMAL(18,2),
+    [gross_cost] DECIMAL(18,2),
+    [avg_cost_price] DECIMAL(18,2),
+    [avg_sell_price] DECIMAL(18,2),
+    [sale_month] INT,
+    [sale_year] INT
 ```
 
 ## 🔄 Рабочий процесс
-
-1. **Scan Files**  
-   Сканирует папку `./data` на наличие новых файлов
-   
-2. **Process File**  
-   Для каждого файла выполняет:
-   - Конвертацию XLSX → CSV (если необходимо)
-   - Создание таблицы в SQL Server
-   - Загрузку данных
-   - Вызов хранимой процедуры
-   - Архивирование файла
-
-## 🐛 Устранение неполадок
-
-**Проверьте логи:**
-```bash
-docker-compose logs -f airflow
+```mermaid
+graph TD
+    A[Scan ./data directory] --> B{New file found?}
+    B -->|Yes| C[Determine retail chain]
+    B -->|No| Z[End process]
+    C --> D[Convert XLSX to CSV]
+    D --> E[Create SQL table]
+    E --> F[Upload data to Test base]
+    F --> G[Modify data with new types (INT, DECIMAL, NVARCHAR)]
+    G --> H[Upload data to Stage base]
+    H --> I[Move file to archive]
+    I --> J[Log success]
 ```
 
-**Пересоберите проект:**
+## 🐛 Устранение неполадок
+**Проверка логов:**
 ```bash
-docker-compose down --volumes
+docker-compose logs -f airflow-worker
+```
+
+
+**Пересборка проекта:**
+```bash
+docker-compose down --volumes --remove-orphans
 docker-compose build --no-cache
 docker-compose up -d
 ```
 
-**Проверьте подключение к MSSQL из контейнера:**
+**Очистка Docker:**
 ```bash
-docker exec -it airflow_webserver_1 bash
-python -c "from sqlalchemy import create_engine; engine = create_engine('$MSSQL_CONN_STR'); conn = engine.connect(); print(conn.execute('SELECT 1').scalar())"
+docker system prune -a --volumes
 ```
