@@ -23,8 +23,8 @@ DEFAULT_CONN_STAGE = (
 )
 
 class Config:
-    MAX_CONCURRENT_TASKS = 2
-    MAX_FILES_PER_RUN = 8
+    MAX_CONCURRENT_TASKS = 1
+    MAX_FILES_PER_RUN = 4
     TASK_TIMEOUT = timedelta(minutes=60)
     MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024 * 1024 # 4GB
 
