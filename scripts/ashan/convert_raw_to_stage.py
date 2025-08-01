@@ -360,7 +360,6 @@ def convert_raw_to_stage(table_name: str, raw_engine: engine.Engine, stage_engin
         raise
 
 
-
 if __name__ == "__main__":
     from sqlalchemy import create_engine
 
