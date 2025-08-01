@@ -1,0 +1,32 @@
+import pandas as pd
+import pickle
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+
+# Пути
+INPUT_CSV = "ml_models/product_enrichment/labeled_brand_products.csv"
+MODEL_PATH = "ml_models/product_enrichment/brand_model.pkl"
+VECTORIZER_PATH = "ml_models/product_enrichment/brand_vectorizer.pkl"
+
+# Загрузка размеченных данных
+df = pd.read_csv(INPUT_CSV, sep=';')
+df.dropna(subset=['product_name', 'brand'], inplace=True)
+
+X = df['product_name']
+y = df['brand']
+
+# Обучение
+vectorizer = TfidfVectorizer(ngram_range=(1, 3), max_features=5000)
+X_vec = vectorizer.fit_transform(X)
+
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_vec, y)
+
+# Сохраняем модель и векторизатор
+with open(MODEL_PATH, 'wb') as f_model:
+    pickle.dump(model, f_model)
+
+with open(VECTORIZER_PATH, 'wb') as f_vec:
+    pickle.dump(vectorizer, f_vec)
+
+print(f"✅ Модель бренда обучена и сохранена:\n→ {MODEL_PATH}\n→ {VECTORIZER_PATH}")
