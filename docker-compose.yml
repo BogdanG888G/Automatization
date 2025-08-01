@@ -34,6 +34,7 @@ services:
       - ./scripts:/opt/airflow/scripts
       - ./data:/opt/airflow/data
       - ./archive:/opt/airflow/archive
+      - ./ml_models:/opt/airflow/ml_models
       - ./requirements.txt:/requirements.txt:ro
     ports:
       - "8080:8080"
