@@ -39,6 +39,7 @@ import time
 from contextlib import closing
 from io import StringIO
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -445,38 +446,63 @@ class AshanTableProcessor:
     # ------------------------------------------------------------------ #
     @classmethod
     def process_data_chunk(cls, df: pd.DataFrame, file_name: str, is_first_chunk: bool) -> pd.DataFrame:
-        """Normalize & enrich one chunk.
-        Steps:
-          - clean headers (first chunk only; subsequent assumed cleaned by stream reader)
-          - rename via mapping
-          - unique-ify column names
-          - drop all-null rows/cols
-          - trim to 255 len per-cell (string)
-          - derive sale_month/year/date if absent
-        """
+        """Normalize & enrich one chunk with ML models."""
         if is_first_chunk:
-            # stream readers already cleaned header; but double-clean just in case
             df.columns = [_clean_header_cell(c) for c in df.columns]
         df = _rename_using_mapping(df)
         df.columns = _make_unique_columns(df.columns.tolist())
         df = _drop_all_nulls(df)
 
-        # Force string, preserve None for NA (pandas nullable string later)
+        # Force string, preserve None for NA
         for col in df.columns:
             try:
                 df[col] = df[col].astype('string')
-            except Exception:  # pragma: no cover
+            except Exception:
                 df[col] = df[col].astype(str)
         df = df.replace({pd.NA: None, np.nan: None})
 
-        # Derive period fields
         df = _derive_period_columns(df, file_name)
 
         # Trim values to <=255
         for col in df.columns:
             df[col] = df[col].astype(str).str.slice(0, 255)
 
+        # ---------------------------------------------------------- #
+        # ML-модели: enrich продуктами (бренд, вкус и т.д.)          #
+        # ---------------------------------------------------------- #
+        name_col_candidates = [c for c in df.columns if 'наимен' in c.lower() or 'product' in c.lower()]
+        if not name_col_candidates:
+            logger.warning(f"[Ashan] Не найдена колонка с названием продукта — enrichment пропущен.")
+            return df
+
+        product_col = name_col_candidates[0]
+        df['product_name'] = df[product_col]
+
+        # Модели и векторайзеры
+        model_dir = "ml_models/product_enrichment"
+        model_paths = {
+            'flavor': ("flavor_model.pkl", "flavor_vectorizer.pkl"),
+            'brand': ("brand_model.pkl", "brand_vectorizer.pkl"),
+            'weight': ("weight_model.pkl", "weight_vectorizer.pkl"),
+            'product_type': ("type_model.pkl", "type_vectorizer.pkl"),
+            # 'package_type': ("package_model.pkl", "package_vectorizer.pkl"),  # опционально
+        }
+
+        def load_pickle(path):
+            with open(path, "rb") as f:
+                return pickle.load(f)
+
+        for col_name, (model_file, vec_file) in model_paths.items():
+            try:
+                model = load_pickle(os.path.join(model_dir, model_file))
+                vectorizer = load_pickle(os.path.join(model_dir, vec_file))
+                vec = vectorizer.transform(df['product_name'].astype(str))
+                df[col_name] = model.predict(vec)
+            except Exception as e:
+                logger.warning(f"[Ashan] Не удалось обогатить '{col_name}': {e}")
+
         return df
+
 
     # ------------------------------------------------------------------ #
     # Table DDL helpers                                                 #
