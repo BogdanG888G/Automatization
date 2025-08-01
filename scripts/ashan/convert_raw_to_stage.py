@@ -37,31 +37,59 @@ class ColumnConfig:
     }
 
     RENAME_MAP = {
-        'дата': 'sales_date',
+        'дата': 'sale_date',
+        'месяц': 'month_name',
+        'месяц_сырое': 'month_raw',
         'сегмент': 'product_segment',
         'семья': 'product_family_code',
         'название_семьи': 'product_family_name',
         'артикул': 'product_article',
         'наименование': 'product_name',
+        'наименование_товара': 'product_name',
+        'ср_цена_продажи': 'avg_sell_price',
+        'ср.цена_продажи': 'avg_sell_price',
+        'ср_цена_покупки': 'avg_purchase_price',
+        'ср.цена_покупки': 'avg_purchase_price',
+        
         'поставщик': 'supplier_code',
+        'код_поставщика': 'supplier_code',
         'наименование_поставщика': 'supplier_name',
+
         'магазин': 'store_code',
         'город': 'city',
         'адрес': 'store_address',
         'формат': 'store_format',
-        'месяц': 'month_name',
-        'ср.цена_продажи': 'avg_sell_price',
+
+        'списания_руб': 'writeoff_amount_rub',
         'списания,_руб.': 'writeoff_amount_rub',
+        'списания_шт': 'writeoff_quantity',
         'списания,_шт.': 'writeoff_quantity',
+
+        'продажи_c_ндс': 'sales_amount_with_vat',
         'продажи,_c_ндс': 'sales_amount_with_vat',
-        'продажи,_кг': 'sales_weight_kg',
+        'продажи_шт': 'sales_quantity',
         'продажи,_шт': 'sales_quantity',
-        'ср.цена_покупки': 'avg_purchase_price',
+        'продажи_кг': 'sales_weight_kg',
+        'продажи,_кг': 'sales_weight_kg',
+
+        'маржа_руб': 'margin_amount_rub',
         'маржа,_руб.': 'margin_amount_rub',
+
+        'потери_руб': 'loss_amount_rub',
         'потери,_руб.': 'loss_amount_rub',
+        'потери_шт': 'loss_quantity',
         'потери,шт': 'loss_quantity',
-        'промо_продажи,_c_ндс': 'promo_sales_amount_with_vat'
+
+        'промо_продажи_c_ндс': 'promo_sales_amount_with_vat',
+        'промо_продажи,_c_ндс': 'promo_sales_amount_with_vat',
+
+        'sale_month': 'sale_month',
+        'sale_year': 'sale_year',
+        'sale_date': 'sale_date',
+        'month_raw': 'month_raw',
+        'date_raw': 'date_raw'
     }
+
 
 
 def _sanitize_column_name(name: str) -> str:
