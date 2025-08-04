@@ -481,10 +481,10 @@ class AshanTableProcessor:
         # Модели и векторайзеры
         model_dir = "ml_models/product_enrichment"
         model_paths = {
-            'flavor': ("flavor_model.pkl", "flavor_vectorizer.pkl"),
-            'brand': ("brand_model.pkl", "brand_vectorizer.pkl"),
-            'weight': ("weight_model.pkl", "weight_vectorizer.pkl"),
-            'product_type': ("type_model.pkl", "type_vectorizer.pkl"),
+            'flavor_predicted': ("flavor_model.pkl", "flavor_vectorizer.pkl"),
+            'brand_predicted': ("brand_model.pkl", "brand_vectorizer.pkl"),
+            'weight_predicted': ("weight_model.pkl", "weight_vectorizer.pkl"),
+            'product_type_predicted': ("type_model.pkl", "type_vectorizer.pkl"),
             # 'package_type': ("package_model.pkl", "package_vectorizer.pkl"),  # опционально
         }
 
