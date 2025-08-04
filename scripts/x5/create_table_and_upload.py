@@ -7,11 +7,13 @@ import time
 from contextlib import closing
 from io import StringIO
 from typing import Optional, Tuple, Dict, List
-
 import numpy as np
 import pandas as pd
 from sqlalchemy import text, event
 from sqlalchemy.engine import Engine
+import pickle
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.base import BaseEstimator
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,11 @@ X5_MONTHS: Dict[str, int] = {
 # ------------------------------------------------------------------ #
 COLUMN_MAPPING: Dict[str, str] = {
     # орг
+    "материал2": "product_name",
+    "товар": "product_name",
+    "наименование": "product_name",
+    "товар": "product_name",
+    "наименование_товара": "product_name",
     "сеть": "retail_chain",
     "филиал": "branch",
     "регион": "region",
@@ -274,6 +281,47 @@ class X5TableProcessor:
     MAX_ROWS = 10_000_000
     BATCH_SIZE = 100_000  # Оптимальный размер батча для вставки
     CHUNKSIZE = 100_000  # Размер чанка для чтения CSV
+    enrichment_models_loaded = False
+
+    @classmethod
+    def _load_enrichment_models(cls):
+        def load_model_and_vectorizer(model_name: str):
+            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
+                model: BaseEstimator = pickle.load(f_model)
+            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
+                vectorizer: TfidfVectorizer = pickle.load(f_vec)
+            return model, vectorizer
+
+        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand")
+        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor")
+        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight")
+        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type")
+
+        cls.enrichment_models_loaded = True
+
+    @classmethod
+    def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
+        if 'product_name' not in df.columns:
+            return df
+
+        if not cls.enrichment_models_loaded:
+            cls._load_enrichment_models()
+
+        product_names = df['product_name'].fillna("")
+
+        def predict(model, vectorizer):
+            try:
+                X_vec = vectorizer.transform(product_names)
+                return model.predict(X_vec)
+            except Exception:
+                return [""] * len(product_names)
+
+        df['brand_predicted'] = predict(cls.brand_model, cls.brand_vectorizer)
+        df['flavor_predicted'] = predict(cls.flavor_model, cls.flavor_vectorizer)
+        df['weight_predicted'] = predict(cls.weight_model, cls.weight_vectorizer)
+        df['type_predicted'] = predict(cls.type_model, cls.type_vectorizer)
+
+        return df
 
     @classmethod
     def process_data_chunk(cls, df: pd.DataFrame, file_name: str, is_first_chunk: bool) -> pd.DataFrame:
@@ -294,7 +342,8 @@ class X5TableProcessor:
         df = _drop_all_nulls(df)
         for col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.slice(0, 255)
-        
+            
+        df = cls._enrich_product_data(df)
         return df.replace("nan", "")
 
 
@@ -347,127 +396,101 @@ class X5TableProcessor:
 
         logger.info(f"Начинаем обработку X5 файла {file_name}, максимум {cls.MAX_ROWS} строк.")
 
-        # --- Read
         ext = os.path.splitext(file_path)[1].lower()
         if ext in (".xlsx", ".xls"):
             sheets = read_excel_safely(file_path, nrows=cls.MAX_ROWS)
+            processed_frames: List[pd.DataFrame] = []
+
+            for sh_name, df in sheets.items():
+                if df is None or df.empty:
+                    logger.warning(f"[X5] Лист {sh_name} пуст — пропуск.")
+                    continue
+
+                logger.info(f"[X5] Обрабатываем лист {sh_name}, строк: {len(df)}.")
+                df = _collapse_to_header_and_data(df)
+                df = _drop_all_nulls(df)
+                df = _rename_using_mapping(df)
+
+                before_cols = df.columns.tolist()
+                uniq_cols = _make_unique_columns(before_cols)
+                if uniq_cols != before_cols:
+                    logger.info(f"[X5] Переименованы дубли колонок: {list(zip(before_cols, uniq_cols))}")
+                df.columns = uniq_cols
+
+                m, y = _extract_month_year_from_filename(file_name)
+                if m: df["sale_month"] = str(m).zfill(2)
+                if y: df["sale_year"] = str(y)
+
+                df = df.replace([np.nan, None], '')
+                for col in df.columns:
+                    try:
+                        df[col] = df[col].astype(str).str.strip()
+                    except Exception as e:
+                        logger.warning(f"[X5] Не удалось привести колонку {col} к строке: {e}")
+
+                if "retail_chain" in df.columns:
+                    df = df[df["retail_chain"].fillna("").str.lower() != "сеть"]
+
+                df = cls._enrich_product_data(df)
+                processed_frames.append(df)
+
+            if not processed_frames:
+                raise ValueError("[X5] Ни один лист не дал данных после обработки.")
+
+            final_df = pd.concat(processed_frames, ignore_index=True)
+            if final_df.empty:
+                raise ValueError("[X5] Итоговый DataFrame пуст.")
+
+            with engine.begin() as conn:
+                exists = conn.execute(
+                    text("""
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema='raw' AND table_name=:tbl
+                    """),
+                    {"tbl": table_name},
+                ).scalar()
+                if not exists:
+                    cols_sql = [f"[{col.replace('[','').replace(']','')}] NVARCHAR(255)" for col in final_df.columns]
+                    create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
+                    logger.debug(f"[X5] CREATE raw SQL: {create_sql}")
+                    conn.execute(text(create_sql))
+
+            cls.bulk_insert_x5(final_df, table_name, engine)
+            dur = time.time() - start
+            logger.info(f"Файл {file_name} загружен в raw.{table_name} за {dur:.2f} сек ({len(final_df)} строк).")
+            return table_name
+
         elif ext == ".csv":
             chunk_iter = cls.read_csv_safely_chunked(file_path, cls.CHUNKSIZE)
             first_chunk = True
-            created_table = False  # Флаг, что таблица создана
+            created_table = False
             total_rows = 0
 
             for df_chunk in chunk_iter:
                 if df_chunk.empty:
                     continue
 
-                # Обработка каждого чанка
                 processed_chunk = cls.process_data_chunk(df_chunk, file_name, first_chunk)
-                
+                processed_chunk = cls._enrich_product_data(processed_chunk)
+
                 if processed_chunk.empty:
                     logger.info("Чанк пуст, пропускаем.")
                     continue
 
-                # Первый чанк: создаем таблицу
-                if first_chunk:
-                    if not processed_chunk.empty or not created_table:
-                        try:
-                            cls.create_table_if_not_exists(processed_chunk, table_name, engine)
-                            created_table = True
-                        except Exception as e:
-                            logger.error(f"Ошибка создания таблицы: {e}")
-                            raise
+                if first_chunk and not created_table:
+                    cls.create_table_if_not_exists(processed_chunk, table_name, engine)
+                    created_table = True
                     first_chunk = False
 
-                # Вставка данных
                 cls.bulk_insert_x5(processed_chunk, table_name, engine)
                 total_rows += len(processed_chunk)
                 logger.info(f"Вставлено {len(processed_chunk)} строк (всего: {total_rows})")
-            
+
             logger.info(f"Всего загружено {total_rows} строк в raw.{table_name}")
             return table_name
+
         else:
             raise ValueError(f"Неподдерживаемый формат: {file_path}")
-
-        processed_frames: List[pd.DataFrame] = []
-
-        for sh_name, df in sheets.items():
-            if df is None or df.empty:
-                logger.warning(f"[X5] Лист {sh_name} пуст — пропуск.")
-                continue
-
-            logger.info(f"[X5] Обрабатываем лист {sh_name}, строк: {len(df)}.")
-
-            # 1) корректные заголовки (пропуск pre-header)
-            df = _collapse_to_header_and_data(df)
-
-            # 2) удалить пустые ряды/колонки
-            df = _drop_all_nulls(df)
-
-            # 3) нормализация + маппинг
-            df = _rename_using_mapping(df)
-
-            # 4) уникализация
-            before_cols = df.columns.tolist()
-            uniq_cols = _make_unique_columns(before_cols)
-            if uniq_cols != before_cols:
-                logger.info(f"[X5] Переименованы дубли колонок: {list(zip(before_cols, uniq_cols))}")
-            df.columns = uniq_cols
-
-            # 5) month/year из имени файла
-            m, y = _extract_month_year_from_filename(file_name)
-            if m:
-                df["sale_month"] = str(m).zfill(2)
-            if y:
-                df["sale_year"] = str(y)
-
-            # 6) все к строкам
-            df = df.replace([np.nan, None], '')
-            for col in df.columns:
-                try:
-                    df[col] = df[col].astype(str).str.strip()
-                except Exception as e:
-                    logger.warning(f"[X5] Не удалось привести колонку {col} к строке: {e}")
-
-            # 7) убрать строку-заголовок, если просочилась
-            if "retail_chain" in df.columns:
-                df = df[df["retail_chain"].fillna("").str.lower() != "сеть"]
-
-            processed_frames.append(df)
-
-        if not processed_frames:
-            raise ValueError("[X5] Ни один лист не дал данных после обработки.")
-
-        final_df = pd.concat(processed_frames, ignore_index=True)
-        if final_df.empty:
-            raise ValueError("[X5] Итоговый DataFrame пуст.")
-
-        # --- create raw table if not exists
-        with engine.begin() as conn:
-            exists = conn.execute(
-                text("""
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema='raw' AND table_name=:tbl
-                """),
-                {"tbl": table_name},
-            ).scalar()
-
-            if not exists:
-                cols_sql = []
-                for col in final_df.columns:
-                    clean = col.replace("]", "").replace("[", "")
-                    cols_sql.append(f"[{clean}] NVARCHAR(255)")
-                create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
-                logger.debug(f"[X5] CREATE raw SQL: {create_sql}")
-                conn.execute(text(create_sql))
-
-        # --- bulk insert
-        cls.bulk_insert_x5(final_df, table_name, engine)
-
-        dur = time.time() - start
-        logger.info(f"Файл {file_name} загружен в raw.{table_name} за {dur:.2f} сек ({len(final_df)} строк).")
-        return table_name
 
 
     @classmethod
