@@ -48,6 +48,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import closing
+import pickle
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -138,6 +139,8 @@ def normalize_magnit_columns(cols: Iterable[Any]) -> List[str]:
         "название_магазина": "store_name",
         "код_товара": "product_code",
         "наименование_товара": "product_name",
+        "наименование": "product_name",
+        "наименование_тп": "product_name",
         "количество": "quantity",
         "сумма": "amount",
         "дата": "date",
@@ -397,6 +400,9 @@ class MagnitTableProcessor:
         self.drop_temp_csv = drop_temp_csv
         enable_sqlserver_fast_executemany(engine)
         self.reader = _FileReader(sample_rows=sample_rows, **file_reader_kwargs)
+        self._load_enrichment_models()
+
+    
 
     # ------------------------------------------------------------------
     # Core API
@@ -418,27 +424,39 @@ class MagnitTableProcessor:
         work_path = self._maybe_convert_excel_to_csv(path)
         is_temp = work_path != path
         try:
-            # Schema sample
-            sample_df = self.reader.sample(work_path)
-            if sample_df.empty:
-                raise ValueError("No data in sample; aborting.")
-            sample_df.columns = normalize_magnit_columns(sample_df.columns)
+            # читаем первый чанк для создания таблицы
+            reader = self.reader.iter_chunks(work_path, self.chunksize)
+            first_chunk = next(reader)
+            if first_chunk.empty:
+                raise ValueError("No data in first chunk; aborting.")
+            first_chunk.columns = normalize_magnit_columns(first_chunk.columns)
+            first_chunk = self._enrich_product_data(first_chunk)
             if self.add_sale_period_from_filename and m and y:
-                sample_df = sample_df.assign(sale_year=str(y), sale_month=f"{m:02d}")
+                first_chunk = first_chunk.assign(sale_year=str(y), sale_month=f"{m:02d}")
+            if not self.raw_text_mode:
+                first_chunk = self._coerce_chunk_types(first_chunk)
 
-            # create table
+            # создаём таблицу по enriched колонкам
             if self.create_table_if_missing:
-                self._ensure_table(sample_df, table_name)
+                self._ensure_table(first_chunk, table_name)
 
-            # stream load
+            # открываем соединение на вставку
             total_rows = 0
             insert_conn, insert_cursor = self._get_insert_cursor()
             try:
                 batch_rows = 0  # executemany batches counter for autocommit
-                for i, chunk in enumerate(self.reader.iter_chunks(work_path, self.chunksize), start=1):
+
+                # вставляем первый чанк
+                inserted, batch_rows = self._insert_chunk_fast(insert_cursor, first_chunk, fq_table, batch_rows)
+                total_rows += inserted
+                logger.info("Inserted %s rows (chunk 1, cumulative %s)", inserted, total_rows)
+
+                # остальные чанки
+                for i, chunk in enumerate(reader, start=2):
                     if chunk.empty:
                         continue
                     chunk.columns = normalize_magnit_columns(chunk.columns)
+                    chunk = self._enrich_product_data(chunk)
                     if self.add_sale_period_from_filename and m and y and (
                         'sale_year' not in chunk.columns or 'sale_month' not in chunk.columns
                     ):
@@ -465,8 +483,39 @@ class MagnitTableProcessor:
             if is_temp and self.drop_temp_csv:
                 try:
                     os.remove(work_path)
-                except OSError:  # pragma: no cover
+                except OSError:
                     logger.warning("Could not remove temp CSV %s", work_path)
+
+    def _load_enrichment_models(self):
+        def load_model_and_vectorizer(model_name: str):
+            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
+                model = pickle.load(f_model)
+            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
+                vectorizer = pickle.load(f_vec)
+            return model, vectorizer
+
+        self.brand_model, self.brand_vectorizer = load_model_and_vectorizer("brand")
+        self.flavor_model, self.flavor_vectorizer = load_model_and_vectorizer("flavor")
+        self.weight_model, self.weight_vectorizer = load_model_and_vectorizer("weight")
+        self.type_model, self.type_vectorizer = load_model_and_vectorizer("type")
+
+    
+    def _enrich_product_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        if 'product_name' not in df.columns:
+            return df  # Без product_name обогащать нечего
+
+        product_names = df['product_name'].fillna("")
+
+        def predict(model, vectorizer):
+            X_vec = vectorizer.transform(product_names)
+            return model.predict(X_vec)
+
+        df['brand_predicted'] = predict(self.brand_model, self.brand_vectorizer)
+        df['flavor_predicted'] = predict(self.flavor_model, self.flavor_vectorizer)
+        df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer)
+        df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
+
+        return df
 
     # ------------------------------------------------------------------
     # Internals
