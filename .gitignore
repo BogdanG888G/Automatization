@@ -5,4 +5,4 @@
 data/
 archive/
 тестовые_данные/
-ml_models/product_enrichment/
+ml_models/product_enrichment/*.csv
