@@ -467,9 +467,9 @@ class AshanTableProcessor:
         for col in df.columns:
             df[col] = df[col].astype(str).str.slice(0, 255)
 
-        # ---------------------------------------------------------- #
-        # ML-модели: enrich продуктами (бренд, вкус и т.д.)          #
-        # ---------------------------------------------------------- #
+        # ----------------------------------------------- #
+        # ML-модели: обогащение по продукту               #
+        # ----------------------------------------------- #
         name_col_candidates = [c for c in df.columns if 'наимен' in c.lower() or 'product' in c.lower()]
         if not name_col_candidates:
             logger.warning(f"[Ashan] Не найдена колонка с названием продукта — enrichment пропущен.")
@@ -478,14 +478,12 @@ class AshanTableProcessor:
         product_col = name_col_candidates[0]
         df['product_name'] = df[product_col]
 
-        # Модели и векторайзеры
         model_dir = "ml_models/product_enrichment"
         model_paths = {
             'flavor_predicted': ("flavor_model.pkl", "flavor_vectorizer.pkl"),
             'brand_predicted': ("brand_model.pkl", "brand_vectorizer.pkl"),
             'weight_predicted': ("weight_model.pkl", "weight_vectorizer.pkl"),
             'product_type_predicted': ("type_model.pkl", "type_vectorizer.pkl"),
-            # 'package_type': ("package_model.pkl", "package_vectorizer.pkl"),  # опционально
         }
 
         def load_pickle(path):
@@ -501,7 +499,41 @@ class AshanTableProcessor:
             except Exception as e:
                 logger.warning(f"[Ashan] Не удалось обогатить '{col_name}': {e}")
 
+        # ----------------------------------------------- #
+        # ML-модели: предсказание по адресу               #
+        # ----------------------------------------------- #
+        address_col_candidates = [c for c in df.columns if 'адрес' in c.lower() or 'address' in c.lower() or 'ad' in c.lower()]
+        if not address_col_candidates:
+            logger.warning(f"[Ashan] Не найдена колонка с адресом — enrichment по адресу пропущен.")
+            return df
+
+        address_col = address_col_candidates[0]
+        try:
+            model_dir_address = "ml_models/address_enrichment"
+
+            # Город
+            city_model = load_pickle(os.path.join(model_dir_address, "city_model.pkl"))
+            city_vectorizer = load_pickle(os.path.join(model_dir_address, "city_vectorizer.pkl"))
+            vec_city = city_vectorizer.transform(df[address_col].astype(str))
+            df['city_predicted'] = city_model.predict(vec_city)
+
+            # Регион
+            region_model = load_pickle(os.path.join(model_dir_address, "region_model.pkl"))
+            region_vectorizer = load_pickle(os.path.join(model_dir_address, "region_vectorizer.pkl"))
+            vec_region = region_vectorizer.transform(df[address_col].astype(str))
+            df['region_predicted'] = region_model.predict(vec_region)
+
+            # Филиал
+            branch_model = load_pickle(os.path.join(model_dir_address, "branch_model.pkl"))
+            branch_vectorizer = load_pickle(os.path.join(model_dir_address, "branch_vectorizer.pkl"))
+            vec_branch = branch_vectorizer.transform(df[address_col].astype(str))
+            df['branch_predicted'] = branch_model.predict(vec_branch)
+
+        except Exception as e:
+            logger.warning(f"[Ashan] Ошибка при предсказании по адресу: {e}")
+
         return df
+
 
 
     # ------------------------------------------------------------------ #
