@@ -1,42 +1,3 @@
-"""
-Magnit large‑file ingestion utilities (turbo, XLSB‑hardened)
-=============================================================
-
-**Goal:** минимально больной и максимально быстрый пайплайн загрузки *огромных* файлов продаж Магнита
-(>1M строк) в SQL Server в *raw*‑схему, с возможностью последующей трансформации в Stage / Prod.
-
-Ключевые задачи ускорения:
-
-* Конвертация тяжёлых **XLSX → CSV** (через `xlsx2csv` CLI; fallback на pandas) перед загрузкой.
-* Поддержка **XLSB** стримом (через `pyxlsb`) без полного чтения в память.
-* Батчевая вставка c **`pyodbc` + `fast_executemany`** напрямую (обход лишних слоёв SQLAlchemy, если указан conn_str).
-* Режим **`raw_text_mode`** — грузим ВСЁ как текст (NVARCHAR(MAX)) в `raw`, а типизацию+парсинг делаем потом в SQL; это *кратно быстрее*, чем парсить Python'ом.
-* Настраиваемые размеры чанков чтения и батчей вставки.
-* Инъекция периода (месяц/год) из имени файла.
-* Устойчивые чтения CSV (sniff delimiter, bad lines policy) и Excel (много листов, мусорные строки в шапке).
-
----
-### Быстрый старт
-```python
-from sqlalchemy import create_engine
-from magnit_loader_turbo import MagnitTableProcessor
-
-engine = create_engine(MagnitTableProcessor.DEFAULT_CONN_TEST, fast_executemany=True)
-
-proc = MagnitTableProcessor(
-    engine=engine,
-    raw_schema="raw",
-    chunksize=100_000,          # чтение CSV/XLSB
-    insert_batch_size=50_000,   # executemany пакет
-    autocommit_batches=5,
-    raw_text_mode=True,         # грузим текстом, преобразуем позже в Stage
-)
-
-proc.process_file("/opt/data/magnit_december_2024_part_1.xlsx")
-```
----
-"""
-
 from __future__ import annotations
 
 import csv
@@ -499,21 +460,41 @@ class MagnitTableProcessor:
         self.weight_model, self.weight_vectorizer = load_model_and_vectorizer("weight")
         self.type_model, self.type_vectorizer = load_model_and_vectorizer("type")
 
+        # Адресные модели
+        address_dir = "ml_models/product_enrichment"
+        self.city_model, self.city_vectorizer = load_model_and_vectorizer("city", address_dir)
+        self.region_model, self.region_vectorizer = load_model_and_vectorizer("region", address_dir)
+        self.district_model, self.district_vectorizer = load_model_and_vectorizer("district", address_dir)
+        self.branch_model, self.branch_vectorizer = load_model_and_vectorizer("branch", address_dir)
+
     
     def _enrich_product_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        if 'product_name' not in df.columns:
-            return df  # Без product_name обогащать нечего
+        if 'product_name' in df.columns:
+            product_names = df['product_name'].fillna("")
 
-        product_names = df['product_name'].fillna("")
+            def predict(model, vectorizer):
+                X_vec = vectorizer.transform(product_names)
+                return model.predict(X_vec)
 
-        def predict(model, vectorizer):
-            X_vec = vectorizer.transform(product_names)
-            return model.predict(X_vec)
+            df['brand_predicted'] = predict(self.brand_model, self.brand_vectorizer)
+            df['flavor_predicted'] = predict(self.flavor_model, self.flavor_vectorizer)
+            df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer)
+            df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
 
-        df['brand_predicted'] = predict(self.brand_model, self.brand_vectorizer)
-        df['flavor_predicted'] = predict(self.flavor_model, self.flavor_vectorizer)
-        df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer)
-        df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
+        # Адресное обогащение
+        address_col_candidates = [c for c in df.columns if 'адрес' in c.lower() or 'ад' in c.lower() or 'ad' in c.lower()]
+        if address_col_candidates:
+            address_col = address_col_candidates[0]
+            addresses = df[address_col].fillna("")
+
+            def predict_address(model, vectorizer):
+                X_vec = vectorizer.transform(addresses)
+                return model.predict(X_vec)
+
+            df['city_predicted'] = predict_address(self.city_model, self.city_vectorizer)
+            df['region_predicted'] = predict_address(self.region_model, self.region_vectorizer)
+            df['district_predicted'] = predict_address(self.district_model, self.district_vectorizer)
+            df['branch_predicted'] = predict_address(self.branch_model, self.branch_vectorizer)
 
         return df
 

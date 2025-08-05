@@ -11,28 +11,16 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import text, event
 from sqlalchemy.engine import Engine
-
+import pickle 
 logger = logging.getLogger(__name__)
 
 
 class PerekrestokTableProcessor:
-    """Raw‑layer loader for Perekrestok retail files.
-
-    Adapted from OkeyTableProcessor. Supports at least two known layouts:
-    1) Period summary (Период / Сеть / Категория / ... / Продажи, руб / Себест., руб)
-    2) Regional store‑level detail (Регион / Город / Адрес / РЦ / Сеть / Категория / ... / ТТ)
-
-    We read up to MAX_ROWS rows per sheet, normalise RU headers -> canonical raw names,
-    infer (sale_year, sale_month) from filename tokens like `perekrestok_ceptember_2024`
-    or from period columns like `сен.24`, then create/append to raw.<table_name>
-    (all NVARCHAR(255)).
-
-    Downstream stage code is expected to parse numerics.
-    """
 
     CHUNKSIZE = 100_000
     BATCH_SIZE = 50_000
     MAX_ROWS = None  # safety cap
+    enrichment_models_loaded = False
 
     # Month map: full, short, dotted, digit mix, latin translit, common typos
     _MONTH_MAP: Dict[str, int] = {
@@ -56,13 +44,7 @@ class PerekrestokTableProcessor:
     # ------------------------------------------------------------------ #
     @classmethod
     def extract_perek_metadata(cls, source: str) -> Tuple[Optional[int], Optional[int]]:
-        """Extract (month, year) from filename or period string.
 
-        Looks for alpha tokens mapped in _MONTH_MAP and 4‑digit year tokens.
-        Accepts period formats like:
-            'сен.24', 'Сен.24', 'сен24', 'сен-24', 'sept2024', 'perekrestok_december_2024'
-        If 2‑digit year found in a period cell we expand heuristically: 00‑79 => 2000‑2079, 80‑99 => 1980‑1999.
-        """
         src = str(source).lower().strip()
 
         # quick try: period tokens like 'сен.24'
@@ -274,6 +256,71 @@ class PerekrestokTableProcessor:
             raise
 
     @classmethod
+    def _load_enrichment_models(cls):
+        def load_model_and_vectorizer(model_name: str):
+            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
+                model = pickle.load(f_model)
+            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
+                vectorizer = pickle.load(f_vec)
+            return model, vectorizer
+
+        # Модели по product_name
+        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand")
+        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor")
+        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight")
+        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type")
+
+        # Модели по address
+        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city")
+        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region")
+        cls.district_model, cls.district_vectorizer = load_model_and_vectorizer("district")
+        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch")
+
+        cls.enrichment_models_loaded = True
+
+
+    @classmethod
+    def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
+        # Загружаем модели один раз
+        if not cls.enrichment_models_loaded:
+            cls._load_enrichment_models()
+
+        # Обогащение по product_name
+        if 'product_name' in df.columns:
+            product_names = df['product_name'].fillna("")
+
+            def predict_product_attr(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(product_names)
+                    return model.predict(X_vec)
+                except Exception:
+                    return [""] * len(product_names)
+
+            df['brand_predicted'] = predict_product_attr(cls.brand_model, cls.brand_vectorizer)
+            df['flavor_predicted'] = predict_product_attr(cls.flavor_model, cls.flavor_vectorizer)
+            df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
+            df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
+
+        # Обогащение по адресу
+        if 'address' in df.columns:
+            addresses = df['address'].fillna("")
+
+            def predict_address_attr(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(addresses)
+                    return model.predict(X_vec)
+                except Exception:
+                    return [""] * len(addresses)
+
+            df['city_predicted'] = predict_address_attr(cls.city_model, cls.city_vectorizer)
+            df['region_predicted'] = predict_address_attr(cls.region_model, cls.region_vectorizer)
+            df['district_predicted'] = predict_address_attr(cls.district_model, cls.district_vectorizer)
+            df['branch_predicted'] = predict_address_attr(cls.branch_model, cls.branch_vectorizer)
+
+        return df
+
+
+    @classmethod
     def _process_and_insert_chunk(cls, df, table_name, fname_month, fname_year, engine, create_table: bool):
         # Нормализация и очистка
         df = cls.normalize_perek_columns(df)
@@ -294,11 +341,22 @@ class PerekrestokTableProcessor:
             if df[col].dtype == 'object':
                 df[col] = (
                     df[col].str.strip()
-                          .str.replace('\u200b', '', regex=False)
-                          .str.replace('\r\n', ' ', regex=False)
-                          .str.replace('\n', ' ', regex=False)
+                        .str.replace('\u200b', '', regex=False)
+                        .str.replace('\r\n', ' ', regex=False)
+                        .str.replace('\n', ' ', regex=False)
                 )
 
+        # --------------------------- #
+        # 🔥 Обогащение товара и адреса
+        # --------------------------- #
+        try:
+            df = cls._enrich_product_data(df)
+        except Exception as e:
+            print(f"[WARN] Не удалось обогатить данные: {e}")
+
+        # --------------------------- #
+        # 🧱 Создание таблицы при необходимости
+        # --------------------------- #
         if create_table:
             with engine.begin() as conn:
                 exists = conn.execute(
@@ -310,6 +368,9 @@ class PerekrestokTableProcessor:
                     create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
                     conn.execute(text(create_sql))
 
+        # --------------------------- #
+        # 🚀 Вставка
+        # --------------------------- #
         cls.bulk_insert_perek(df, table_name, engine)
 
     # ------------------------------------------------------------------ #

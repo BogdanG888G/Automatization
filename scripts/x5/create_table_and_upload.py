@@ -279,8 +279,8 @@ def read_excel_safely(file_path: str, nrows: Optional[int]) -> Dict[str, pd.Data
 # ------------------------------------------------------------------ #
 class X5TableProcessor:
     MAX_ROWS = 10_000_000
-    BATCH_SIZE = 100_000  # Оптимальный размер батча для вставки
-    CHUNKSIZE = 100_000  # Размер чанка для чтения CSV
+    BATCH_SIZE = 100_000
+    CHUNKSIZE = 100_000
     enrichment_models_loaded = False
 
     @classmethod
@@ -292,34 +292,58 @@ class X5TableProcessor:
                 vectorizer: TfidfVectorizer = pickle.load(f_vec)
             return model, vectorizer
 
+        # Модели по продуктам
         cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand")
         cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor")
         cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight")
         cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type")
 
+        # Модели по адресам
+        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city")
+        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region")
+        cls.district_model, cls.district_vectorizer = load_model_and_vectorizer("district")
+        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch")
+
         cls.enrichment_models_loaded = True
 
     @classmethod
     def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
-        if 'product_name' not in df.columns:
-            return df
-
         if not cls.enrichment_models_loaded:
             cls._load_enrichment_models()
 
-        product_names = df['product_name'].fillna("")
+        # Продукты
+        if 'product_name' in df.columns:
+            product_names = df['product_name'].fillna("")
 
-        def predict(model, vectorizer):
-            try:
-                X_vec = vectorizer.transform(product_names)
-                return model.predict(X_vec)
-            except Exception:
-                return [""] * len(product_names)
+            def predict_product(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(product_names)
+                    return model.predict(X_vec)
+                except Exception:
+                    return [""] * len(product_names)
 
-        df['brand_predicted'] = predict(cls.brand_model, cls.brand_vectorizer)
-        df['flavor_predicted'] = predict(cls.flavor_model, cls.flavor_vectorizer)
-        df['weight_predicted'] = predict(cls.weight_model, cls.weight_vectorizer)
-        df['type_predicted'] = predict(cls.type_model, cls.type_vectorizer)
+            df['brand_predicted'] = predict_product(cls.brand_model, cls.brand_vectorizer)
+            df['flavor_predicted'] = predict_product(cls.flavor_model, cls.flavor_vectorizer)
+            df['weight_predicted'] = predict_product(cls.weight_model, cls.weight_vectorizer)
+            df['type_predicted'] = predict_product(cls.type_model, cls.type_vectorizer)
+
+        # Адреса
+        address_col_candidates = [c for c in df.columns if 'адрес' in c.lower()]
+        if address_col_candidates:
+            address_col = address_col_candidates[0]
+            addresses = df[address_col].fillna("")
+
+            def predict_address(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(addresses)
+                    return model.predict(X_vec)
+                except Exception:
+                    return [""] * len(addresses)
+
+            df['city_predicted'] = predict_address(cls.city_model, cls.city_vectorizer)
+            df['region_predicted'] = predict_address(cls.region_model, cls.region_vectorizer)
+            df['district_predicted'] = predict_address(cls.district_model, cls.district_vectorizer)
+            df['branch_predicted'] = predict_address(cls.branch_model, cls.branch_vectorizer)
 
         return df
 

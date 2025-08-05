@@ -34,7 +34,7 @@ class TableProcessorDiksi:
     @staticmethod
     def enrich_with_ml_models(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Обогащает DataFrame колонками: brand, flavor, weight и т.д. с помощью ML-моделей.
+        Обогащает DataFrame колонками: brand, flavor, weight, product_type, city, region, district, branch.
         """
         name_col_candidates = [c for c in df.columns if 'наимен' in c.lower() or 'тов' in c.lower()]
         if not name_col_candidates:
@@ -56,6 +56,7 @@ class TableProcessorDiksi:
             with open(path, "rb") as f:
                 return pickle.load(f)
 
+        # Обогащение по продукту
         for col_name, (model_file, vec_file) in model_paths.items():
             try:
                 model = load_pickle(os.path.join(model_dir, model_file))
@@ -65,7 +66,35 @@ class TableProcessorDiksi:
             except Exception as e:
                 logger.warning(f"[Diksi] Не удалось обогатить '{col_name}': {e}")
 
+        # =============================
+        # Обогащение по адресу
+        # =============================
+        address_col_candidates = [c for c in df.columns if 'адрес' in c.lower()]
+        if not address_col_candidates:
+            logger.warning("[Diksi] Не найдена колонка с адресом — enrichment по адресу пропущен.")
+            return df
+
+        address_col = address_col_candidates[0]
+        df['адрес'] = df[address_col]
+
+        address_model_paths = {
+            'city': ("city_model.pkl", "city_vectorizer.pkl"),
+            'region': ("region_model.pkl", "region_vectorizer.pkl"),
+            'district': ("district_model.pkl", "district_vectorizer.pkl"),
+            'branch': ("branch_model.pkl", "branch_vectorizer.pkl"),
+        }
+
+        for col_name, (model_file, vec_file) in address_model_paths.items():
+            try:
+                model = load_pickle(os.path.join(model_dir, model_file))
+                vectorizer = load_pickle(os.path.join(model_dir, vec_file))
+                vec = vectorizer.transform(df['адрес'].astype(str))
+                df[col_name] = model.predict(vec)
+            except Exception as e:
+                logger.warning(f"[Diksi] Не удалось обогатить '{col_name}': {e}")
+
         return df
+
 
     @staticmethod
     def extract_metadata(source: str) -> tuple[int | None, int | None]:

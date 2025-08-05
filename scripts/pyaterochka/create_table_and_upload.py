@@ -5,7 +5,7 @@ import time
 from contextlib import closing
 from io import StringIO
 from typing import Optional, Tuple, Dict, List, Union
-
+import pickle
 import pyodbc
 import pandas as pd
 import numpy as np
@@ -19,6 +19,7 @@ class PyaterochkaTableProcessor:
     CHUNKSIZE = 100_000
     BATCH_SIZE = 10_000
     MAX_ROWS = 10_000  # Максимальное количество строк для чтения
+    enrichment_models_loaded = False
 
     # Специфичные для Пятёрочки форматы данных и метаданных
     PYATEROCHKA_MONTHS = {
@@ -33,6 +34,69 @@ class PyaterochkaTableProcessor:
         'сен': 9, 'окт': 10, 'ноя': 11, 'дек': 12,
         'янв': 1, 'фев': 2, 'мар': 3, 'апр': 4, 'май': 5, 'июн': 6
     }
+    @classmethod
+    def _load_enrichment_models(cls):
+        def load_model_and_vectorizer(model_name: str):
+            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
+                model = pickle.load(f_model)
+            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
+                vectorizer = pickle.load(f_vec)
+            return model, vectorizer
+
+        # Модели по product_name
+        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand")
+        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor")
+        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight")
+        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type")
+
+        # Модели по address
+        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city")
+        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region")
+        cls.district_model, cls.district_vectorizer = load_model_and_vectorizer("district")
+        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch")
+
+        cls.enrichment_models_loaded = True
+
+    @classmethod
+    def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
+        if not cls.enrichment_models_loaded:
+            cls._load_enrichment_models()
+
+        # Обогащение по product_name
+        if 'product_name' in df.columns:
+            product_names = df['product_name'].fillna("")
+
+            def predict_product_attr(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(product_names)
+                    return model.predict(X_vec)
+                except Exception as e:
+                    logger.warning(f"Ошибка предсказания по продукту: {e}")
+                    return [""] * len(product_names)
+
+            df['brand_predicted'] = predict_product_attr(cls.brand_model, cls.brand_vectorizer)
+            df['flavor_predicted'] = predict_product_attr(cls.flavor_model, cls.flavor_vectorizer)
+            df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
+            df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
+
+        # Обогащение по адресу
+        if 'address' in df.columns:
+            addresses = df['address'].fillna("")
+
+            def predict_address_attr(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(addresses)
+                    return model.predict(X_vec)
+                except Exception as e:
+                    logger.warning(f"Ошибка предсказания по адресу: {e}")
+                    return [""] * len(addresses)
+
+            df['city_predicted'] = predict_address_attr(cls.city_model, cls.city_vectorizer)
+            df['region_predicted'] = predict_address_attr(cls.region_model, cls.region_vectorizer)
+            df['district_predicted'] = predict_address_attr(cls.district_model, cls.district_vectorizer)
+            df['branch_predicted'] = predict_address_attr(cls.branch_model, cls.branch_vectorizer)
+
+        return df
 
     @staticmethod
     def extract_pyaterochka_metadata(source: str) -> Tuple[Optional[int], Optional[int]]:
@@ -180,15 +244,14 @@ class PyaterochkaTableProcessor:
 
     @classmethod
     def process_pyaterochka_file(cls, file_path: str, engine: Engine) -> str:
-        """Основной метод обработки файла Пятёрочки"""
+        """Основной метод обработки файла Пятёрочки с обогащением"""
         start_time = time.time()
         file_name = os.path.basename(file_path)
         base_name = os.path.splitext(file_name)[0]
         table_name = re.sub(r'\W+', '_', base_name.lower())
 
-        logger.info(f"Начало обработки файла: {file_name} (будет прочитано максимум {cls.MAX_ROWS} строк)")
-        
-        # Чтение файла в зависимости от формата
+        logger.info(f"Начало обработки файла: {file_name} (максимум {cls.MAX_ROWS} строк)")
+
         if file_path.endswith('.xlsx'):
             reader = cls._read_excel_file(file_path)
         elif file_path.endswith('.xlsb'):
@@ -206,19 +269,22 @@ class PyaterochkaTableProcessor:
                     continue
 
                 logger.info(f"Обработка листа {sheet_name}, строк: {len(df)}")
-                
-                # Нормализация и обработка данных
+
+                # Нормализация и очистка
                 df = cls.normalize_pyaterochka_columns(df)
-                
+
                 # Извлечение метаданных
                 month, year = cls.extract_pyaterochka_metadata(file_name)
                 if month and year:
                     df = df.assign(sale_year=str(year), sale_month=str(month).zfill(2))
 
-                # Очистка данных - все значения как строки
+                # Очистка: все значения в строки, удаление спецсимволов
                 df = df.replace([np.nan, None], '')
                 for col in df.columns:
-                    df[col] = df[col].astype(str).str.strip().str.replace('\u200b', '')
+                    df[col] = df[col].astype(str).str.strip().str.replace('\u200b', '', regex=False)
+
+                # Обогащение
+                df = cls._enrich_product_data(df)
 
                 processed_chunks.append(df)
             except Exception as e:
@@ -229,12 +295,10 @@ class PyaterochkaTableProcessor:
             raise ValueError("Файл не содержит валидных данных")
 
         final_df = pd.concat(processed_chunks, ignore_index=True)
-        
-        # Проверка на пустые данные после обработки
+
         if final_df.empty:
             raise ValueError("Файл не содержит данных после обработки")
 
-        # Создание таблицы в БД - все колонки как NVARCHAR
         with engine.begin() as conn:
             if not conn.execute(
                 text("SELECT 1 FROM information_schema.tables WHERE table_schema='raw' AND table_name=:table"),
@@ -244,33 +308,29 @@ class PyaterochkaTableProcessor:
                 for col in final_df.columns:
                     clean_col = col.replace('"', '').replace("'", "")
                     columns_sql.append(f'[{clean_col}] NVARCHAR(255)')
-                
                 create_table_sql = f"CREATE TABLE raw.{table_name} ({', '.join(columns_sql)})"
                 logger.debug(f"SQL создания таблицы: {create_table_sql}")
                 conn.execute(text(create_table_sql))
 
-        # Вставка данных
         cls.bulk_insert_pyaterochka(final_df, table_name, engine)
 
         duration = time.time() - start_time
         logger.info(f"Файл {file_name} успешно загружен в raw.{table_name} за {duration:.2f} сек ({len(final_df)} строк)")
         return table_name
-
+    
     @classmethod
     def bulk_insert_pyaterochka(cls, df: pd.DataFrame, table_name: str, engine: Engine):
-        """Массовая вставка данных (оптимизировано для 1 млн строк)"""
+        """Массовая вставка данных"""
         @event.listens_for(engine, 'before_cursor_execute')
         def set_fast_executemany(conn, cursor, statement, parameters, context, executemany):
             if executemany:
                 cursor.fast_executemany = True
 
-        # Подготовка SQL
         cols = ', '.join(f'[{col}]' for col in df.columns)
         params = ', '.join(['?'] * len(df.columns))
         insert_sql = f"INSERT INTO raw.{table_name} ({cols}) VALUES ({params})"
 
         def row_generator():
-            """Генератор строк без сохранения в памяти"""
             for row in df.itertuples(index=False, name=None):
                 clean_row = [
                     '' if pd.isna(value) or value in ('', None)
@@ -279,7 +339,6 @@ class PyaterochkaTableProcessor:
                 ]
                 yield tuple(clean_row)
 
-        # Вставка батчами
         with closing(engine.raw_connection()) as conn:
             cursor = conn.cursor()
             batch = []

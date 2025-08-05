@@ -28,6 +28,7 @@ class OkeyTableProcessor:
     CHUNKSIZE = 100_000
     BATCH_SIZE = 10_000
     MAX_ROWS = 10_000  # safety cap
+    enrichment_models_loaded = False
 
     # month tokens recognised in filenames (both rus & simple translit typos like "ceptember")
     _MONTH_MAP = {
@@ -60,6 +61,67 @@ class OkeyTableProcessor:
                 month = cls._MONTH_MAP[t]
                 break
         return month, year
+
+    @classmethod
+    def _load_enrichment_models(cls):
+        def load_model_and_vectorizer(model_name: str):
+            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
+                model = pickle.load(f_model)
+            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
+                vectorizer = pickle.load(f_vec)
+            return model, vectorizer
+
+        # Модели по product_name
+        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand")
+        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor")
+        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight")
+        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type")
+
+        # Модели по address
+        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city")
+        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region")
+        cls.district_model, cls.district_vectorizer = load_model_and_vectorizer("district")
+        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch")
+
+        cls.enrichment_models_loaded = True
+
+    @classmethod
+    def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
+        if not cls.enrichment_models_loaded:
+            cls._load_enrichment_models()
+
+        if 'product_name' in df.columns:
+            product_names = df['product_name'].fillna("")
+
+            def predict_product_attr(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(product_names)
+                    return model.predict(X_vec)
+                except Exception:
+                    return [""] * len(product_names)
+
+            df['brand_predicted'] = predict_product_attr(cls.brand_model, cls.brand_vectorizer)
+            df['flavor_predicted'] = predict_product_attr(cls.flavor_model, cls.flavor_vectorizer)
+            df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
+            df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
+
+        if 'address' in df.columns:
+            addresses = df['address'].fillna("")
+
+            def predict_address_attr(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(addresses)
+                    return model.predict(X_vec)
+                except Exception:
+                    return [""] * len(addresses)
+
+            df['city_predicted'] = predict_address_attr(cls.city_model, cls.city_vectorizer)
+            df['region_predicted'] = predict_address_attr(cls.region_model, cls.region_vectorizer)
+            df['district_predicted'] = predict_address_attr(cls.district_model, cls.district_vectorizer)
+            df['branch_predicted'] = predict_address_attr(cls.branch_model, cls.branch_vectorizer)
+
+        return df
+
 
     # ------------------------------------------------------------------
     # Column normalisation
@@ -206,131 +268,118 @@ class OkeyTableProcessor:
             logger.error("Excel read error: %s", e)
             raise
 
+
+    @classmethod
+    def _process_and_insert_chunk(cls, df, table_name, fname_month, fname_year, engine, create_table: bool):
+        # Нормализация — пример, нужно реализовать самостоятельно
+        df = cls.normalize_okey_columns(df)
+
+        # Метаданные периода
+        month, year = fname_month, fname_year
+        if (month is None or year is None) and 'period' in df.columns and not df['period'].isna().all():
+            m2, y2 = cls.extract_okey_metadata(str(df['period'].iloc[0]))
+            month = month or m2
+            year = year or y2
+        if month and year:
+            df['sale_year'] = str(year)
+            df['sale_month'] = str(month).zfill(2)
+
+        df = df.fillna('')
+
+        # Очистка строковых колонок
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = (
+                    df[col].str.strip()
+                        .str.replace('\u200b', '', regex=False)
+                        .str.replace('\r\n', ' ', regex=False)
+                        .str.replace('\n', ' ', regex=False)
+                )
+
+        # Обогащение моделей
+        try:
+            df = cls._enrich_product_data(df)
+        except Exception as e:
+            print(f"[WARN] Не удалось обогатить данные: {e}")
+
+        # Создание таблицы, если нужно
+        if create_table:
+            with engine.begin() as conn:
+                exists = conn.execute(
+                    text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'raw' AND table_name = :table"),
+                    {"table": table_name}
+                ).scalar()
+                if not exists:
+                    cols_sql = [f"[{col}] NVARCHAR(255)" for col in df.columns]
+                    create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
+                    conn.execute(text(create_sql))
+
+        # Вставка данных
+        cls.bulk_insert_okey(df, table_name, engine)
+
+    @classmethod
+    def bulk_insert_okey(cls, df, table_name, engine):
+        conn = engine.raw_connection()
+        cursor = conn.cursor()
+        cursor.fast_executemany = True
+
+        cols = df.columns.tolist()
+        insert_sql = f"INSERT INTO raw.{table_name} ({', '.join([f'[{c}]' for c in cols])}) VALUES ({', '.join(['?' for _ in cols])})"
+
+        data = df.values.tolist()
+        batch_size = cls.BATCH_SIZE
+
+        for i in range(0, len(data), batch_size):
+            batch = data[i:i + batch_size]
+            cursor.executemany(insert_sql, batch)
+        conn.commit()
+        cursor.close()
+        conn.close()
+
     # ------------------------------------------------------------------
     # Main processing
     # ------------------------------------------------------------------
     @classmethod
-    def process_okey_file(cls, file_path: str, engine: Engine) -> str:
-        """Read O'KEY file -> normalise -> load to raw schema.
-
-        Returns created table name in *raw*.
-        """
+    def process_okey_file(cls, file_path: str, engine):
+        import time
         start_time = time.time()
         file_name = os.path.basename(file_path)
         base_name = os.path.splitext(file_name)[0]
         table_name = re.sub(r"\W+", "_", base_name.lower())
 
-        logger.info("[O'KEY] Начало обработки файла: %s (<=%s строк)", file_name, cls.MAX_ROWS)
-
-        # --- read
-        if file_path.endswith('.xlsx'):
-            reader = cls._read_excel_file(file_path)
-        elif file_path.endswith('.xlsb'):
-            reader = cls._read_xlsb_file(file_path)
-        elif file_path.endswith('.csv'):
-            reader = {'data': cls._safe_read_okey_csv(file_path)}
+        if file_path.endswith('.csv'):
+            reader = pd.read_csv(
+                file_path,
+                dtype='string',
+                sep=';',
+                quotechar='"',
+                decimal=',',
+                thousands=' ',
+                chunksize=cls.CHUNKSIZE,
+                on_bad_lines='warn',
+                encoding='utf-8-sig',
+            )
+        elif file_path.endswith('.xlsx'):
+            reader = pd.read_excel(file_path, sheet_name=None)
         else:
             raise ValueError(f"Unsupported file format: {file_path}")
 
-        processed_chunks: List[pd.DataFrame] = []
-        for sheet_name, df in reader.items():
-            if df.empty:
-                logger.warning("[O'KEY] Лист %s пуст", sheet_name)
-                continue
-            logger.info("[O'KEY] Обработка листа %s, строк: %s", sheet_name, len(df))
+        fname_month, fname_year = cls.extract_okey_metadata(file_name)
 
-            try:
-                df = cls.normalize_okey_columns(df)
-
-                # filename metadata
-                month, year = cls.extract_okey_metadata(file_name)
-                if month and year:
-                    df = df.assign(sale_year=str(year), sale_month=str(month).zfill(2))
-
-                # clean values (all strings in raw)
-                df = df.replace([np.nan, None], '')
-                for col in df.columns:
-                    df[col] = df[col].astype(str).str.strip().str.replace('\u200b', '', regex=False)
-
-                processed_chunks.append(df)
-            except Exception as e:  # noqa: BLE001
-                logger.error("[O'KEY] Ошибка обработки листа %s: %s", sheet_name, e, exc_info=True)
-                continue
-
-        if not processed_chunks:
-            raise ValueError("File contains no valid data")
-
-        final_df = pd.concat(processed_chunks, ignore_index=True)
-        if final_df.empty:
-            raise ValueError("No data after processing")
-
-        # --- ensure raw table exists (all NVARCHAR(255))
-        with engine.begin() as conn:
-            exists = conn.execute(
-                text("SELECT 1 FROM information_schema.tables WHERE table_schema='raw' AND table_name=:table"),
-                {"table": table_name},
-            ).scalar()
-            if not exists:
-                cols_sql = []
-                for col in final_df.columns:
-                    clean_col = col.replace('"', '').replace("'", '')
-                    cols_sql.append(f"[{clean_col}] NVARCHAR(255)")
-                create_table_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
-                logger.debug("[O'KEY] SQL создания таблицы: %s", create_table_sql)
-                conn.execute(text(create_table_sql))
-
-        # --- insert
-        cls.bulk_insert_okey(final_df, table_name, engine)
+        first_chunk = True
+        for chunk in (reader if isinstance(reader, pd.io.parsers.TextFileReader) else [reader]):
+            if isinstance(chunk, dict):
+                for sheet_name, df in chunk.items():
+                    cls._process_and_insert_chunk(df, table_name, fname_month, fname_year, engine, first_chunk)
+                    first_chunk = False
+            else:
+                cls._process_and_insert_chunk(chunk, table_name, fname_month, fname_year, engine, first_chunk)
+                first_chunk = False
 
         duration = time.time() - start_time
-        logger.info(
-            "[O'KEY] Файл %s успешно загружен в raw.%s за %.2f сек (%s строк)",
-            file_name, table_name, duration, len(final_df)
-        )
+        print(f"[Okey] Файл {file_name} загружен в raw.{table_name} за {duration:.2f} сек")
         return table_name
 
-    # ------------------------------------------------------------------
-    # Bulk insert
-    # ------------------------------------------------------------------
-    @classmethod
-    def bulk_insert_okey(cls, df: pd.DataFrame, table_name: str, engine: Engine):
-        """Batch insert into raw.<table_name> (all values as strings) using chunks."""
-
-        @event.listens_for(engine, 'before_cursor_execute')
-        def _set_fast_executemany(conn, cursor, statement, parameters, context, executemany):
-            if executemany:
-                cursor.fast_executemany = True
-
-        cols = ', '.join(f'[{col}]' for col in df.columns)
-        params = ', '.join(['?'] * len(df.columns))
-        insert_sql = f"INSERT INTO raw.{table_name} ({cols}) VALUES ({params})"
-
-        with closing(engine.raw_connection()) as conn:
-            with conn.cursor() as cursor:
-                total_rows = len(df)
-                logger.info("[O'KEY] Начало вставки %s строк в таблицу raw.%s", total_rows, table_name)
-
-                for start in range(0, total_rows, cls.BATCH_SIZE):
-                    batch_df = df.iloc[start:start + cls.BATCH_SIZE]
-                    batch_data = [
-                        tuple(
-                            (str(val).strip()[:255] if pd.notna(val) and val != '' else '')
-                            for val in row
-                        )
-                        for row in batch_df.itertuples(index=False, name=None)
-                    ]
-
-                    try:
-                        cursor.executemany(insert_sql, batch_data)
-                        conn.commit()
-                        logger.debug("[O'KEY] Вставлен пакет строк: %s-%s", start, start + len(batch_data))
-                    except Exception as e:
-                        conn.rollback()
-                        logger.error(
-                            "[O'KEY] Ошибка вставки пакета строк %s-%s: %s",
-                            start, start + len(batch_data), e
-                        )
-                        raise
 
 
 
