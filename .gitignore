@@ -6,3 +6,6 @@ data/
 archive/
 тестовые_данные/
 ml_models/product_enrichment/*.csv
+ml_models/product_enrichment/*.pkl
+ml_models/address_enrichment/*.csv
+ml_models/address_enrichment/*.pkl
