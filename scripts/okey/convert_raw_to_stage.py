@@ -1,35 +1,4 @@
-"""
-High‑volume optimized conversion from raw.<table> to stage.<schema>.<table> for Okey data.
 
-Key improvements vs. original version (aimed at 1M+ rows):
-
-1. **True streaming, no full concat** – process and load each chunk as soon as it's cleaned;
-   avoids building a multi‑GB in‑memory DataFrame.
-2. **Single schema inference up front** – infer *final* stage columns once (from
-   ColumnConfig + presence in first processed chunk). Ensures stable column order and types.
-3. **Deterministic column order & defaults** – every chunk is reindexed to the full stage column set.
-   Missing columns filled with sensible defaults (0.0 for numerics, "" for strings, None for month).
-4. **Vectorized month parsing** – faster parsing for typical "YYYY-MM-DD", "MM.YYYY", or RU month abbreviations.
-5. **Reduced logging overhead** – debug‑level row dumps removed; periodic progress logging.
-6. **Faster sanitization** – precomputed map; avoid repeated regex for known columns.
-7. **Efficient bulk insert** – per‑chunk `fast_executemany` with array binding; optional batch size split to cap memory.
-8. **Optional truncate / append / skip** – behavior controlled by params.
-9. **Safer numeric conversion** – central helper; handles commas, spaces, and ton->kg scaling.
-10. **Explicit SQL type mapping** – created exactly once (unless `ensure_schema_each_chunk=True`).
-
-Usage
------
->>> convert_raw_to_stage(
-...     table_name="okey_sales_2024",
-...     raw_engine=raw_engine,
-...     stage_engine=stage_engine,
-...     stage_schema="okey",
-...     chunk_size=100_000,
-...     drop_stage_if_exists=True,
-... )
-
-This module is self‑contained; copy into your project and adjust logging config.
-"""
 from __future__ import annotations
 
 import logging

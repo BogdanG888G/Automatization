@@ -44,12 +44,13 @@ class TableProcessorDiksi:
         product_col = name_col_candidates[0]
         df['товар'] = df[product_col]
 
-        model_dir = "ml_models/product_enrichment"
+        model_product_dir = "ml_models/product_enrichment"
+        model_address_dir = "ml_models/address_enrichment"
         model_paths = {
-            'flavor': ("flavor_model.pkl", "flavor_vectorizer.pkl"),
-            'brand': ("brand_model.pkl", "brand_vectorizer.pkl"),
-            'weight': ("weight_model.pkl", "weight_vectorizer.pkl"),
-            'product_type': ("type_model.pkl", "type_vectorizer.pkl"),
+            'predicted_flavor': ("flavor_model.pkl", "flavor_vectorizer.pkl"),
+            'predicted_brand': ("brand_model.pkl", "brand_vectorizer.pkl"),
+            'predicted_weight': ("weight_model.pkl", "weight_vectorizer.pkl"),
+            'predicted_product_type': ("type_model.pkl", "type_vectorizer.pkl"),
         }
 
         def load_pickle(path):
@@ -59,8 +60,8 @@ class TableProcessorDiksi:
         # Обогащение по продукту
         for col_name, (model_file, vec_file) in model_paths.items():
             try:
-                model = load_pickle(os.path.join(model_dir, model_file))
-                vectorizer = load_pickle(os.path.join(model_dir, vec_file))
+                model = load_pickle(os.path.join(model_product_dir, model_file))
+                vectorizer = load_pickle(os.path.join(model_product_dir, vec_file))
                 vec = vectorizer.transform(df['товар'].astype(str))
                 df[col_name] = model.predict(vec)
             except Exception as e:
@@ -78,16 +79,15 @@ class TableProcessorDiksi:
         df['адрес'] = df[address_col]
 
         address_model_paths = {
-            'city': ("city_model.pkl", "city_vectorizer.pkl"),
-            'region': ("region_model.pkl", "region_vectorizer.pkl"),
-            'district': ("district_model.pkl", "district_vectorizer.pkl"),
-            'branch': ("branch_model.pkl", "branch_vectorizer.pkl"),
+            'predicted_city': ("city_model.pkl", "city_vectorizer.pkl"),
+            'predicted_region': ("region_model.pkl", "region_vectorizer.pkl"),
+            'predicted_branch': ("branch_model.pkl", "branch_vectorizer.pkl"),
         }
 
         for col_name, (model_file, vec_file) in address_model_paths.items():
             try:
-                model = load_pickle(os.path.join(model_dir, model_file))
-                vectorizer = load_pickle(os.path.join(model_dir, vec_file))
+                model = load_pickle(os.path.join(model_address_dir, model_file))
+                vectorizer = load_pickle(os.path.join(model_address_dir, vec_file))
                 vec = vectorizer.transform(df['адрес'].astype(str))
                 df[col_name] = model.predict(vec)
             except Exception as e:

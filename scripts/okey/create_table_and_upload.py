@@ -12,18 +12,13 @@ import numpy as np
 from sqlalchemy import text, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
+import pickle 
 
 logger = logging.getLogger(__name__)
 
 
 class OkeyTableProcessor:
-    """Raw‑layer loader for O'KEY retail files.
 
-    Behaviour mirrors *PyaterochkaTableProcessor* so downstream stage code can be re‑used
-    with minimal change. We standardise RU headers -> canonical raw column names (period,
-    retail_chain, ...), read only the first MAX_ROWS rows per sheet, and create / append to
-    a *raw* schema table (all NVARCHAR(255)) before later typed staging.
-    """
 
     CHUNKSIZE = 100_000
     BATCH_SIZE = 10_000
@@ -44,13 +39,12 @@ class OkeyTableProcessor:
         'oct': 10, 'nov': 11, 'dec': 12,
     }
 
+    def __init__(self):
+        self.enrichment_models_loaded = False
+        self._load_enrichment_models()
+
     @classmethod
     def extract_okey_metadata(cls, source: str) -> Tuple[Optional[int], Optional[int]]:
-        """Extract (month, year) from filename.
-
-        Accepts tokens of letters and 4‑digit years; tries month lookup in `_MONTH_MAP`.
-        Returns (None, None) if nothing found.
-        """
         src = str(source).lower()
         # split into alpha tokens & 4‑digit numeric tokens
         tokens = re.findall(r"[a-zа-я]+|\d{4}", src)
@@ -62,65 +56,69 @@ class OkeyTableProcessor:
                 break
         return month, year
 
-    @classmethod
-    def _load_enrichment_models(cls):
-        def load_model_and_vectorizer(model_name: str):
-            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
+
+    def _load_enrichment_models(self):
+        def load_model_and_vectorizer(model_name: str, folder: str):
+            with open(f"{folder}/{model_name}_model.pkl", "rb") as f_model:
                 model = pickle.load(f_model)
-            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
+            with open(f"{folder}/{model_name}_vectorizer.pkl", "rb") as f_vec:
                 vectorizer = pickle.load(f_vec)
             return model, vectorizer
 
-        # Модели по product_name
-        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand")
-        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor")
-        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight")
-        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type")
+        # Папки с моделями
+        product_dir = "ml_models/product_enrichment"
+        address_dir = "ml_models/address_enrichment"
 
-        # Модели по address
-        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city")
-        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region")
-        cls.district_model, cls.district_vectorizer = load_model_and_vectorizer("district")
-        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch")
+        # Модели обогащения по названию продукта (product_name)
+        self.brand_model, self.brand_vectorizer = load_model_and_vectorizer("brand", product_dir)
+        self.flavor_model, self.flavor_vectorizer = load_model_and_vectorizer("flavor", product_dir)
+        self.weight_model, self.weight_vectorizer = load_model_and_vectorizer("weight", product_dir)
+        self.type_model, self.type_vectorizer = load_model_and_vectorizer("type", product_dir)
 
-        cls.enrichment_models_loaded = True
+        # Модели обогащения по адресу
+        self.city_model, self.city_vectorizer = load_model_and_vectorizer("city", address_dir)
+        self.region_model, self.region_vectorizer = load_model_and_vectorizer("region", address_dir)
+        self.branch_model, self.branch_vectorizer = load_model_and_vectorizer("branch", address_dir)
 
-    @classmethod
-    def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
-        if not cls.enrichment_models_loaded:
-            cls._load_enrichment_models()
+        self.enrichment_models_loaded = True
 
-        if 'product_name' in df.columns:
-            product_names = df['product_name'].fillna("")
+    def _enrich_product_data(self, df: pd.DataFrame) -> pd.DataFrame:
+            if not self.enrichment_models_loaded:
+                self._load_enrichment_models()
 
-            def predict_product_attr(model, vectorizer):
-                try:
-                    X_vec = vectorizer.transform(product_names)
-                    return model.predict(X_vec)
-                except Exception:
-                    return [""] * len(product_names)
+            if 'product_name' in df.columns:
+                product_names = df['product_name'].fillna("")
 
-            df['brand_predicted'] = predict_product_attr(cls.brand_model, cls.brand_vectorizer)
-            df['flavor_predicted'] = predict_product_attr(cls.flavor_model, cls.flavor_vectorizer)
-            df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
-            df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
+                def predict(model, vectorizer):
+                    try:
+                        X_vec = vectorizer.transform(product_names)
+                        return model.predict(X_vec)
+                    except Exception:
+                        return [""] * len(product_names)
 
-        if 'address' in df.columns:
-            addresses = df['address'].fillna("")
+                df['brand_predicted'] = predict(self.brand_model, self.brand_vectorizer)
+                df['flavor_predicted'] = predict(self.flavor_model, self.flavor_vectorizer)
+                df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer)
+                df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
 
-            def predict_address_attr(model, vectorizer):
-                try:
-                    X_vec = vectorizer.transform(addresses)
-                    return model.predict(X_vec)
-                except Exception:
-                    return [""] * len(addresses)
+            address_col_candidates = [c for c in df.columns if any(k in c.lower() for k in ['адрес', 'address'])]
+            if address_col_candidates:
+                address_col = address_col_candidates[0]
+                addresses = df[address_col].fillna("")
 
-            df['city_predicted'] = predict_address_attr(cls.city_model, cls.city_vectorizer)
-            df['region_predicted'] = predict_address_attr(cls.region_model, cls.region_vectorizer)
-            df['district_predicted'] = predict_address_attr(cls.district_model, cls.district_vectorizer)
-            df['branch_predicted'] = predict_address_attr(cls.branch_model, cls.branch_vectorizer)
+                def predict_address(model, vectorizer):
+                    try:
+                        X_vec = vectorizer.transform(addresses)
+                        return model.predict(X_vec)
+                    except Exception:
+                        return [""] * len(addresses)
 
-        return df
+                df['city_predicted'] = predict_address(self.city_model, self.city_vectorizer)
+                df['region_predicted'] = predict_address(self.region_model, self.region_vectorizer)
+                df['branch_predicted'] = predict_address(self.branch_model, self.branch_vectorizer)
+
+            return df
+
 
 
     # ------------------------------------------------------------------
@@ -269,124 +267,117 @@ class OkeyTableProcessor:
             raise
 
 
-    @classmethod
-    def _process_and_insert_chunk(cls, df, table_name, fname_month, fname_year, engine, create_table: bool):
-        # Нормализация — пример, нужно реализовать самостоятельно
-        df = cls.normalize_okey_columns(df)
+    def _process_and_insert_chunk(self, df, table_name, fname_month, fname_year, engine, create_table: bool):
+            df = self.normalize_okey_columns(df)
 
-        # Метаданные периода
-        month, year = fname_month, fname_year
-        if (month is None or year is None) and 'period' in df.columns and not df['period'].isna().all():
-            m2, y2 = cls.extract_okey_metadata(str(df['period'].iloc[0]))
-            month = month or m2
-            year = year or y2
-        if month and year:
-            df['sale_year'] = str(year)
-            df['sale_month'] = str(month).zfill(2)
+            # Метаданные
+            if (fname_month is None or fname_year is None) and 'period' in df.columns and not df['period'].isna().all():
+                m2, y2 = self.extract_okey_metadata(str(df['period'].iloc[0]))
+                fname_month = fname_month or m2
+                fname_year = fname_year or y2
 
-        df = df.fillna('')
+            if fname_month and fname_year:
+                df['sale_year'] = str(fname_year)
+                df['sale_month'] = str(fname_month).zfill(2)
 
-        # Очистка строковых колонок
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                df[col] = (
-                    df[col].str.strip()
-                        .str.replace('\u200b', '', regex=False)
-                        .str.replace('\r\n', ' ', regex=False)
-                        .str.replace('\n', ' ', regex=False)
-                )
+            df = df.fillna('')
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    df[col] = (
+                        df[col].str.strip()
+                            .str.replace('\u200b', '', regex=False)
+                            .str.replace('\r\n', ' ', regex=False)
+                            .str.replace('\n', ' ', regex=False)
+                    )
 
-        # Обогащение моделей
-        try:
-            df = cls._enrich_product_data(df)
-        except Exception as e:
-            print(f"[WARN] Не удалось обогатить данные: {e}")
+            try:
+                df = self._enrich_product_data(df)
+            except Exception as e:
+                print(f"[WARN] Обогащение не выполнено: {e}")
 
-        # Создание таблицы, если нужно
-        if create_table:
-            with engine.begin() as conn:
-                exists = conn.execute(
-                    text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'raw' AND table_name = :table"),
-                    {"table": table_name}
-                ).scalar()
-                if not exists:
-                    cols_sql = [f"[{col}] NVARCHAR(255)" for col in df.columns]
-                    create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
-                    conn.execute(text(create_sql))
+            if create_table:
+                with engine.begin() as conn:
+                    exists = conn.execute(
+                        text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'raw' AND table_name = :table"),
+                        {"table": table_name}
+                    ).scalar()
+                    if not exists:
+                        cols_sql = [f"[{col}] NVARCHAR(255)" for col in df.columns]
+                        create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
+                        conn.execute(text(create_sql))
 
-        # Вставка данных
-        cls.bulk_insert_okey(df, table_name, engine)
+            self.bulk_insert_okey(df, table_name, engine)
 
-    @classmethod
-    def bulk_insert_okey(cls, df, table_name, engine):
-        conn = engine.raw_connection()
-        cursor = conn.cursor()
-        cursor.fast_executemany = True
 
-        cols = df.columns.tolist()
-        insert_sql = f"INSERT INTO raw.{table_name} ({', '.join([f'[{c}]' for c in cols])}) VALUES ({', '.join(['?' for _ in cols])})"
 
-        data = df.values.tolist()
-        batch_size = cls.BATCH_SIZE
+    def bulk_insert_okey(self, df, table_name, engine):
+            conn = engine.raw_connection()
+            cursor = conn.cursor()
+            cursor.fast_executemany = True
 
-        for i in range(0, len(data), batch_size):
-            batch = data[i:i + batch_size]
-            cursor.executemany(insert_sql, batch)
-        conn.commit()
-        cursor.close()
-        conn.close()
+            cols = df.columns.tolist()
+            insert_sql = f"INSERT INTO raw.{table_name} ({', '.join([f'[{c}]' for c in cols])}) VALUES ({', '.join(['?' for _ in cols])})"
+
+            data = df.values.tolist()
+            for i in range(0, len(data), self.BATCH_SIZE):
+                batch = data[i:i + self.BATCH_SIZE]
+                cursor.executemany(insert_sql, batch)
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+
 
     # ------------------------------------------------------------------
     # Main processing
     # ------------------------------------------------------------------
-    @classmethod
-    def process_okey_file(cls, file_path: str, engine):
-        import time
-        start_time = time.time()
-        file_name = os.path.basename(file_path)
-        base_name = os.path.splitext(file_name)[0]
-        table_name = re.sub(r"\W+", "_", base_name.lower())
+    def process_okey_file(self, file_path: str, engine: Engine) -> str:
+            import time
+            start_time = time.time()
 
-        if file_path.endswith('.csv'):
-            reader = pd.read_csv(
-                file_path,
-                dtype='string',
-                sep=';',
-                quotechar='"',
-                decimal=',',
-                thousands=' ',
-                chunksize=cls.CHUNKSIZE,
-                on_bad_lines='warn',
-                encoding='utf-8-sig',
-            )
-        elif file_path.endswith('.xlsx'):
-            reader = pd.read_excel(file_path, sheet_name=None)
-        else:
-            raise ValueError(f"Unsupported file format: {file_path}")
+            file_name = os.path.basename(file_path)
+            base_name = os.path.splitext(file_name)[0]
+            table_name = re.sub(r"\W+", "_", base_name.lower())
 
-        fname_month, fname_year = cls.extract_okey_metadata(file_name)
-
-        first_chunk = True
-        for chunk in (reader if isinstance(reader, pd.io.parsers.TextFileReader) else [reader]):
-            if isinstance(chunk, dict):
-                for sheet_name, df in chunk.items():
-                    cls._process_and_insert_chunk(df, table_name, fname_month, fname_year, engine, first_chunk)
-                    first_chunk = False
+            if file_path.endswith('.csv'):
+                reader = pd.read_csv(
+                    file_path,
+                    dtype='string',
+                    sep=';',
+                    quotechar='"',
+                    decimal=',',
+                    thousands=' ',
+                    chunksize=self.CHUNKSIZE,
+                    on_bad_lines='warn',
+                    encoding='utf-8-sig',
+                )
+            elif file_path.endswith('.xlsx'):
+                reader = pd.read_excel(file_path, sheet_name=None)
             else:
-                cls._process_and_insert_chunk(chunk, table_name, fname_month, fname_year, engine, first_chunk)
-                first_chunk = False
+                raise ValueError(f"Unsupported file format: {file_path}")
 
-        duration = time.time() - start_time
-        print(f"[Okey] Файл {file_name} загружен в raw.{table_name} за {duration:.2f} сек")
-        return table_name
+            fname_month, fname_year = self.extract_okey_metadata(file_name)
+            first_chunk = True
 
+            for chunk in (reader if isinstance(reader, pd.io.parsers.TextFileReader) else [reader]):
+                if isinstance(chunk, dict):  # multiple sheets
+                    for _, df in chunk.items():
+                        self._process_and_insert_chunk(df, table_name, fname_month, fname_year, engine, first_chunk)
+                        first_chunk = False
+                else:
+                    self._process_and_insert_chunk(chunk, table_name, fname_month, fname_year, engine, first_chunk)
+                    first_chunk = False
 
+            duration = time.time() - start_time
+            print(f"[Okey] Загружено в raw.{table_name} за {duration:.2f} сек")
+            return table_name
 
 
 def create_okey_table_and_upload(file_path: str, engine: Engine) -> str:
     """Convenience wrapper for DAG usage."""
     try:
-        return OkeyTableProcessor.process_okey_file(file_path, engine)
+        processor = OkeyTableProcessor()
+        return processor.process_okey_file(file_path, engine)
     except Exception as e:  # noqa: BLE001
         logger.error("Критическая ошибка при обработке файла %s: %s", file_path, e, exc_info=True)
         raise

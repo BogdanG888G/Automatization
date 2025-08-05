@@ -285,65 +285,69 @@ class X5TableProcessor:
 
     @classmethod
     def _load_enrichment_models(cls):
-        def load_model_and_vectorizer(model_name: str):
-            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
-                model: BaseEstimator = pickle.load(f_model)
-            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
-                vectorizer: TfidfVectorizer = pickle.load(f_vec)
+        def load_model_and_vectorizer(model_name: str, folder: str):
+            with open(f"{folder}/{model_name}_model.pkl", "rb") as f_model:
+                model = pickle.load(f_model)
+            with open(f"{folder}/{model_name}_vectorizer.pkl", "rb") as f_vec:
+                vectorizer = pickle.load(f_vec)
             return model, vectorizer
 
-        # Модели по продуктам
-        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand")
-        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor")
-        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight")
-        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type")
+        product_dir = "ml_models/product_enrichment"
+        address_dir = "ml_models/address_enrichment"
 
-        # Модели по адресам
-        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city")
-        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region")
-        cls.district_model, cls.district_vectorizer = load_model_and_vectorizer("district")
-        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch")
+        # Модели по product_name
+        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand", product_dir)
+        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor", product_dir)
+        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight", product_dir)
+        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type", product_dir)
+
+        # Модели по адресу
+        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city", address_dir)
+        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region", address_dir)
+        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch", address_dir)
 
         cls.enrichment_models_loaded = True
+
 
     @classmethod
     def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
         if not cls.enrichment_models_loaded:
             cls._load_enrichment_models()
 
-        # Продукты
+        # Обогащение по product_name
         if 'product_name' in df.columns:
             product_names = df['product_name'].fillna("")
 
-            def predict_product(model, vectorizer):
+            def predict_product_attr(model, vectorizer):
                 try:
                     X_vec = vectorizer.transform(product_names)
                     return model.predict(X_vec)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Ошибка предсказания по продукту: {e}")
                     return [""] * len(product_names)
 
-            df['brand_predicted'] = predict_product(cls.brand_model, cls.brand_vectorizer)
-            df['flavor_predicted'] = predict_product(cls.flavor_model, cls.flavor_vectorizer)
-            df['weight_predicted'] = predict_product(cls.weight_model, cls.weight_vectorizer)
-            df['type_predicted'] = predict_product(cls.type_model, cls.type_vectorizer)
+            df['brand_predicted'] = predict_product_attr(cls.brand_model, cls.brand_vectorizer)
+            df['flavor_predicted'] = predict_product_attr(cls.flavor_model, cls.flavor_vectorizer)
+            df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
+            df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
 
-        # Адреса
-        address_col_candidates = [c for c in df.columns if 'адрес' in c.lower()]
+        # Обогащение по адресу — ищем колонку, где в названии есть "адрес" (регистр игнорируем)
+        address_col_candidates = [c for c in df.columns if 'add' in c.lower()]
         if address_col_candidates:
             address_col = address_col_candidates[0]
             addresses = df[address_col].fillna("")
 
-            def predict_address(model, vectorizer):
+            def predict_address_attr(model, vectorizer):
                 try:
                     X_vec = vectorizer.transform(addresses)
                     return model.predict(X_vec)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Ошибка предсказания по адресу: {e}")
                     return [""] * len(addresses)
 
-            df['city_predicted'] = predict_address(cls.city_model, cls.city_vectorizer)
-            df['region_predicted'] = predict_address(cls.region_model, cls.region_vectorizer)
-            df['district_predicted'] = predict_address(cls.district_model, cls.district_vectorizer)
-            df['branch_predicted'] = predict_address(cls.branch_model, cls.branch_vectorizer)
+            df['city_predicted'] = predict_address_attr(cls.city_model, cls.city_vectorizer)
+            df['region_predicted'] = predict_address_attr(cls.region_model, cls.region_vectorizer)
+            df['branch_predicted'] = predict_address_attr(cls.branch_model, cls.branch_vectorizer)
 
         return df
 

@@ -257,26 +257,29 @@ class PerekrestokTableProcessor:
 
     @classmethod
     def _load_enrichment_models(cls):
-        def load_model_and_vectorizer(model_name: str):
-            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
+        def load_model_and_vectorizer(model_name: str, folder: str):
+            with open(f"{folder}/{model_name}_model.pkl", "rb") as f_model:
                 model = pickle.load(f_model)
-            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
+            with open(f"{folder}/{model_name}_vectorizer.pkl", "rb") as f_vec:
                 vectorizer = pickle.load(f_vec)
             return model, vectorizer
 
+        product_dir = "ml_models/product_enrichment"
+        address_dir = "ml_models/address_enrichment"
+
         # Модели по product_name
-        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand")
-        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor")
-        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight")
-        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type")
+        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand", product_dir)
+        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor", product_dir)
+        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight", product_dir)
+        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type", product_dir)
 
         # Модели по address
-        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city")
-        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region")
-        cls.district_model, cls.district_vectorizer = load_model_and_vectorizer("district")
-        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch")
+        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city", address_dir)
+        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region", address_dir)
+        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch", address_dir)
 
         cls.enrichment_models_loaded = True
+
 
 
     @classmethod
@@ -314,7 +317,6 @@ class PerekrestokTableProcessor:
 
             df['city_predicted'] = predict_address_attr(cls.city_model, cls.city_vectorizer)
             df['region_predicted'] = predict_address_attr(cls.region_model, cls.region_vectorizer)
-            df['district_predicted'] = predict_address_attr(cls.district_model, cls.district_vectorizer)
             df['branch_predicted'] = predict_address_attr(cls.branch_model, cls.branch_vectorizer)
 
         return df

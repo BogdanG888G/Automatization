@@ -448,26 +448,28 @@ class MagnitTableProcessor:
                     logger.warning("Could not remove temp CSV %s", work_path)
 
     def _load_enrichment_models(self):
-        def load_model_and_vectorizer(model_name: str):
-            with open(f"ml_models/product_enrichment/{model_name}_model.pkl", "rb") as f_model:
+        def load_model_and_vectorizer(model_name: str, folder: str):
+            with open(f"{folder}/{model_name}_model.pkl", "rb") as f_model:
                 model = pickle.load(f_model)
-            with open(f"ml_models/product_enrichment/{model_name}_vectorizer.pkl", "rb") as f_vec:
+            with open(f"{folder}/{model_name}_vectorizer.pkl", "rb") as f_vec:
                 vectorizer = pickle.load(f_vec)
             return model, vectorizer
 
-        self.brand_model, self.brand_vectorizer = load_model_and_vectorizer("brand")
-        self.flavor_model, self.flavor_vectorizer = load_model_and_vectorizer("flavor")
-        self.weight_model, self.weight_vectorizer = load_model_and_vectorizer("weight")
-        self.type_model, self.type_vectorizer = load_model_and_vectorizer("type")
+        product_dir = "ml_models/product_enrichment"
+        address_dir = "ml_models/address_enrichment"
 
-        # Адресные модели
-        address_dir = "ml_models/product_enrichment"
+        # Модели по product_name
+        self.brand_model, self.brand_vectorizer = load_model_and_vectorizer("brand", product_dir)
+        self.flavor_model, self.flavor_vectorizer = load_model_and_vectorizer("flavor", product_dir)
+        self.weight_model, self.weight_vectorizer = load_model_and_vectorizer("weight", product_dir)
+        self.type_model, self.type_vectorizer = load_model_and_vectorizer("type", product_dir)
+
+        # Модели по адресу
         self.city_model, self.city_vectorizer = load_model_and_vectorizer("city", address_dir)
         self.region_model, self.region_vectorizer = load_model_and_vectorizer("region", address_dir)
-        self.district_model, self.district_vectorizer = load_model_and_vectorizer("district", address_dir)
         self.branch_model, self.branch_vectorizer = load_model_and_vectorizer("branch", address_dir)
 
-    
+
     def _enrich_product_data(self, df: pd.DataFrame) -> pd.DataFrame:
         if 'product_name' in df.columns:
             product_names = df['product_name'].fillna("")
@@ -482,7 +484,7 @@ class MagnitTableProcessor:
             df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
 
         # Адресное обогащение
-        address_col_candidates = [c for c in df.columns if 'адрес' in c.lower() or 'ад' in c.lower() or 'ad' in c.lower()]
+        address_col_candidates = [c for c in df.columns if any(key in c.lower() for key in ['адрес', 'address'])]
         if address_col_candidates:
             address_col = address_col_candidates[0]
             addresses = df[address_col].fillna("")
@@ -493,10 +495,10 @@ class MagnitTableProcessor:
 
             df['city_predicted'] = predict_address(self.city_model, self.city_vectorizer)
             df['region_predicted'] = predict_address(self.region_model, self.region_vectorizer)
-            df['district_predicted'] = predict_address(self.district_model, self.district_vectorizer)
             df['branch_predicted'] = predict_address(self.branch_model, self.branch_vectorizer)
 
         return df
+
 
     # ------------------------------------------------------------------
     # Internals
