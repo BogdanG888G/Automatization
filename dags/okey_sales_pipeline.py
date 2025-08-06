@@ -15,7 +15,7 @@ import pyxlsb  # Для поддержки xlsb
 
 # Коннекты для тестовой и стейдж-баз
 DEFAULT_CONN_TEST = (
-    "mssql+pyodbc://airflow_agent:123@host.docker.internal/Test"
+    "mssql+pyodbc://airflow_agent:123@host.docker.internal/Stage"
     "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
 )
 DEFAULT_CONN_STAGE = (
@@ -159,37 +159,19 @@ def process_okey_file(file_path: str):
             archive_file(file_path, error=True)
             return
 
-        engine_test = get_engine('test')
+        engine_test = get_engine('stage')
         try:
             from okey.create_table_and_upload import create_okey_table_and_upload
             table_name = create_okey_table_and_upload(file_path, engine=engine_test)
-            logging.info(f"Okey data loaded to raw.{table_name}")
+            logging.info(f"Okey data loaded to okey.{table_name}")
         except exc.SQLAlchemyError as e:
             engine_test.dispose()
             logging.error(f"Raw load error: {str(e)}")
             archive_file(file_path, error=True)
             raise RuntimeError(f"Raw load error: {str(e)}")
-
-        engine_stage = get_engine('stage')
-        try:
-            from okey.convert_raw_to_stage import convert_raw_to_stage
-            convert_raw_to_stage(
-                table_name=table_name,
-                raw_engine=engine_test,
-                stage_engine=engine_stage,
-                stage_schema=OkeyConfig.STAGE_SCHEMA,
-                limit=None,
-                drop_stage_if_exists=True,  # <<< ОБЯЗАТЕЛЬНО один прогон
-            )
-            logging.info("Okey data loaded to stage")
-        except exc.SQLAlchemyError as e:
-            engine_stage.dispose()
-            logging.error(f"Stage load error: {str(e)}")
-            archive_file(file_path, error=True)
-            raise RuntimeError(f"Stage load error: {str(e)}")
+        
         finally:
             engine_test.dispose()
-            engine_stage.dispose()
 
         archive_file(file_path)
 

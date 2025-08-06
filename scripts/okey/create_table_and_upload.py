@@ -298,12 +298,12 @@ class OkeyTableProcessor:
             if create_table:
                 with engine.begin() as conn:
                     exists = conn.execute(
-                        text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'raw' AND table_name = :table"),
+                        text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'okey' AND table_name = :table"),
                         {"table": table_name}
                     ).scalar()
                     if not exists:
                         cols_sql = [f"[{col}] NVARCHAR(255)" for col in df.columns]
-                        create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
+                        create_sql = f"CREATE TABLE okey.{table_name} ({', '.join(cols_sql)})"
                         conn.execute(text(create_sql))
 
             self.bulk_insert_okey(df, table_name, engine)
@@ -316,7 +316,7 @@ class OkeyTableProcessor:
             cursor.fast_executemany = True
 
             cols = df.columns.tolist()
-            insert_sql = f"INSERT INTO raw.{table_name} ({', '.join([f'[{c}]' for c in cols])}) VALUES ({', '.join(['?' for _ in cols])})"
+            insert_sql = f"INSERT INTO okey.{table_name} ({', '.join([f'[{c}]' for c in cols])}) VALUES ({', '.join(['?' for _ in cols])})"
 
             data = df.values.tolist()
             for i in range(0, len(data), self.BATCH_SIZE):
@@ -369,7 +369,7 @@ class OkeyTableProcessor:
                     first_chunk = False
 
             duration = time.time() - start_time
-            print(f"[Okey] Загружено в raw.{table_name} за {duration:.2f} сек")
+            print(f"[Okey] Загружено в okey.{table_name} за {duration:.2f} сек")
             return table_name
 
 
