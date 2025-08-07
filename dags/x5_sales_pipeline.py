@@ -32,7 +32,7 @@ DEFAULT_CONN_STAGE = (
 # ----------------------------------- #
 class X5Config:
     MAX_CONCURRENT_TASKS = 2
-    MAX_FILES_PER_RUN = 8
+    MAX_FILES_PER_RUN = 2
     TASK_TIMEOUT = timedelta(minutes=120)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
     POOL_SLOTS = 4  # Сбалансировать с pool_size БД

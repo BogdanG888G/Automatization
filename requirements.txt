@@ -5,3 +5,6 @@ psycopg2-binary
 sqlalchemy<2.0.0
 pyxlsb
 scikit-learn
+natasha
+razdel==0.5.0
+pymorphy2==0.9.1
