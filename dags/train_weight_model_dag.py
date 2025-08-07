@@ -15,7 +15,7 @@ def train_weight_model():
     if not os.path.exists(INPUT_CSV):
         raise FileNotFoundError(f"Файл {INPUT_CSV} не найден.")
 
-    df = pd.read_csv(INPUT_CSV, sep=';')
+    df = pd.read_csv(INPUT_CSV, sep=';').drop_duplicates()
     df.dropna(subset=['product_name', 'weight'], inplace=True)
 
     X = df['product_name']

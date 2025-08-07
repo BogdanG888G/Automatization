@@ -4,50 +4,72 @@ from datetime import datetime
 import pandas as pd
 import pickle
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
+from lightgbm import LGBMClassifier
 import os
 
-def train_flavor_model():
-    import os
+def preprocess_text(text):
+    if not isinstance(text, str):
+        return ""
+    return text.lower().strip()
 
+def train_flavor_model():
     INPUT_CSV = "ml_models/product_enrichment/labeled_flavor_products.csv"
     MODEL_PATH = "ml_models/product_enrichment/flavor_model.pkl"
     VECTORIZER_PATH = "ml_models/product_enrichment/flavor_vectorizer.pkl"
-
-    print(f"Текущая рабочая директория: {os.getcwd()}")
 
     if not os.path.exists(INPUT_CSV):
         raise FileNotFoundError(f"Файл {INPUT_CSV} не найден.")
 
     df = pd.read_csv(INPUT_CSV, sep=';')
-    print(f"Размер исходных данных: {df.shape}")
-    print(f"Первые 5 строк данных:\n{df.head()}")
-
     df.dropna(subset=['product_name', 'flavor'], inplace=True)
-    print(f"Размер данных после dropna по ['product_name', 'flavor']: {df.shape}")
     if df.empty:
-        raise ValueError("После удаления пропусков датафрейм пустой.")
+        raise ValueError("Датасет пуст после удаления пропусков.")
+
+    # Предобработка текста
+    df['product_name'] = df['product_name'].apply(preprocess_text)
 
     X = df['product_name']
     y = df['flavor']
 
-    vectorizer = TfidfVectorizer(ngram_range=(1, 3), max_features=5000)
-    X_vec = vectorizer.fit_transform(X)
-    print(f"Размер обучающего признакового пространства: {X_vec.shape}")
+    # Разделение данных на train/test
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, stratify=y, test_size=0.2, random_state=42
+    )
 
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_vec, y)
-    print(f"Модель обучена: {'estimators_' in dir(model)}")
+    vectorizer = TfidfVectorizer(
+        ngram_range=(1, 3),
+        max_features=5000,
+        stop_words='russian',
+        min_df=3,  # слова должны встречаться минимум в 3 документах
+        max_df=0.9 # слова встречающиеся более чем в 90% документов исключаем
+    )
+    X_train_vec = vectorizer.fit_transform(X_train)
+    X_test_vec = vectorizer.transform(X_test)
 
+    # Обучение LightGBM
+    model = LGBMClassifier(
+        n_estimators=200,
+        learning_rate=0.1,
+        random_state=42,
+        verbose=-1,
+        class_weight='balanced'  # если классы несбалансированы
+    )
+    model.fit(X_train_vec, y_train)
+
+    # Оценка модели
+    y_pred = model.predict(X_test_vec)
+    print("Accuracy на тесте:", accuracy_score(y_test, y_pred))
+    print("Отчёт классификации:\n", classification_report(y_test, y_pred))
+
+    # Сохраняем модель и векторизатор
     with open(MODEL_PATH, 'wb') as f_model:
         pickle.dump(model, f_model)
     with open(VECTORIZER_PATH, 'wb') as f_vec:
         pickle.dump(vectorizer, f_vec)
 
-    size_model = os.path.getsize(MODEL_PATH)
-    size_vectorizer = os.path.getsize(VECTORIZER_PATH)
-    print(f"✅ Модель сохранена: {MODEL_PATH} (размер: {size_model} байт)")
-    print(f"✅ Векторизатор сохранён: {VECTORIZER_PATH} (размер: {size_vectorizer} байт)")
+    print(f"✅ Модель вкуса обучена и сохранена:\n→ {MODEL_PATH}\n→ {VECTORIZER_PATH}")
 
 
 default_args = {
@@ -59,10 +81,10 @@ default_args = {
 with DAG(
     dag_id='train_flavor_model_dag',
     default_args=default_args,
-    schedule_interval=None,  # запускаем вручную
+    schedule_interval=None,
     catchup=False,
     tags=['model_training', 'flavor'],
-    description='Обучение модели по вкусам',
+    description='Оптимизированное обучение модели вкуса продукта',
 ) as dag:
 
     train_model = PythonOperator(
