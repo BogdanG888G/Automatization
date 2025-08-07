@@ -256,37 +256,31 @@ class PerekrestokTableProcessor:
             raise
 
     @classmethod
-    def _load_enrichment_models(cls):
-        def load_model_and_vectorizer(model_name: str, folder: str):
-            with open(f"{folder}/{model_name}_model.pkl", "rb") as f_model:
-                model = pickle.load(f_model)
-            with open(f"{folder}/{model_name}_vectorizer.pkl", "rb") as f_vec:
-                vectorizer = pickle.load(f_vec)
-            return model, vectorizer
-
-        product_dir = "ml_models/product_enrichment"
-        address_dir = "ml_models/address_enrichment"
-
-        # Модели по product_name
-        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand", product_dir)
-        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor", product_dir)
-        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight", product_dir)
-        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type", product_dir)
-
-        # Модели по address
-        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city", address_dir)
-        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region", address_dir)
-        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch", address_dir)
-
-        cls.enrichment_models_loaded = True
-
-
-
-    @classmethod
     def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
         # Загружаем модели один раз
         if not cls.enrichment_models_loaded:
             cls._load_enrichment_models()
+
+        # Функция для извлечения веса из строки product_name
+        weight_pattern = re.compile(
+            r'(\d+(?:[.,]\d+)?)[ ]?(г(?:р|рамм)?|кг|кг\.|гр|грамм)',
+            flags=re.IGNORECASE
+        )
+
+        def extract_weight(text):
+            match = weight_pattern.search(text)
+            if match:
+                value = match.group(1).replace(',', '.')
+                unit = match.group(2).lower()
+                try:
+                    value_float = float(value)
+                    if 'кг' in unit:
+                        return value_float * 1000  # перевод в граммы
+                    else:
+                        return value_float
+                except:
+                    return None
+            return None
 
         # Обогащение по product_name
         if 'product_name' in df.columns:
@@ -303,6 +297,9 @@ class PerekrestokTableProcessor:
             df['flavor_predicted'] = predict_product_attr(cls.flavor_model, cls.flavor_vectorizer)
             df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
             df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
+
+            # Добавляем столбец с извлечённым из текста весом
+            df['weight_extracted'] = product_names.apply(extract_weight)
 
         # Обогащение по адресу → город → регион и филиал
         if 'address' in df.columns:

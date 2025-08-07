@@ -22,7 +22,7 @@ def train_type_model():
     if not os.path.exists(INPUT_CSV):
         raise FileNotFoundError(f"Файл {INPUT_CSV} не найден.")
 
-    df = pd.read_csv(INPUT_CSV, sep=';')
+    df = pd.read_csv(INPUT_CSV, sep=';').drop_duplicates()
     df.dropna(subset=['product_name', 'product_type'], inplace=True)
     if df.empty:
         raise ValueError("Датасет пуст после удаления пропусков.")
@@ -32,6 +32,15 @@ def train_type_model():
     X = df['product_name']
     y = df['product_type']
 
+    value_counts = y.value_counts()
+
+    # Оставляем только те, у кого хотя бы 2 наблюдения
+    valid_classes = value_counts[value_counts >= 2].index
+
+    # Фильтруем X и y
+    X = X[y.isin(valid_classes)]
+    y = y[y.isin(valid_classes)]
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, stratify=y, test_size=0.2, random_state=42
     )
@@ -39,7 +48,7 @@ def train_type_model():
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 3),
         max_features=5000,
-        stop_words='russian',
+        stop_words=None,
         min_df=3,
         max_df=0.9
     )

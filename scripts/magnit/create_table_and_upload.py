@@ -469,6 +469,34 @@ class MagnitTableProcessor:
         self.region_model, self.region_vectorizer = load_model_and_vectorizer("region", address_dir)
         self.branch_model, self.branch_vectorizer = load_model_and_vectorizer("branch", address_dir)
 
+    def extract_weight_from_name(self, name: str) -> float | None:
+        if not isinstance(name, str):
+            return None
+
+        weight_pattern = re.compile(
+            r"(?P<weight>\d{1,4}(?:[.,]\d{1,3})?)\s?(г|гр|грамм|грам|грм|кг|килограмм|мл|мл\.|шт|штук|шт\.|pack|упак|упаковка|пак|пакет|bag|bag\.|банка|банок|бан|баночка|б\.|литр|л|л\.|лит|литров)\b",
+            flags=re.IGNORECASE
+        )
+
+        match = weight_pattern.search(name)
+        if not match:
+            return None
+
+        weight_str = match.group("weight").replace(",", ".")
+        try:
+            weight = float(weight_str)
+        except ValueError:
+            return None
+
+        unit = match.group(2).lower()
+        if unit in ["кг", "килограмм"]:
+            weight *= 1000
+        elif unit in ["л", "литр", "литров", "л."]:
+            weight *= 1000
+        elif unit in ["шт", "штук", "шт."]:
+            return None
+
+        return weight
 
     def _enrich_product_data(self, df: pd.DataFrame) -> pd.DataFrame:
         if 'product_name' in df.columns:
@@ -483,22 +511,22 @@ class MagnitTableProcessor:
             df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer, product_names)
             df['type_predicted'] = predict(self.type_model, self.type_vectorizer, product_names)
 
-        # Адресное обогащение с цепочкой предсказаний
+            # Добавим свой столбец с весом из названия
+            df['weight_extracted'] = df['product_name'].apply(self.extract_weight_from_name)
+
+        # Обогащение по адресу
         address_col_candidates = [c for c in df.columns if any(key in c.lower() for key in ['адрес', 'address'])]
         if address_col_candidates:
             address_col = address_col_candidates[0]
             addresses = df[address_col].fillna("")
 
-            # 1) Предсказание города по адресу
             city_vec = self.city_vectorizer.transform(addresses)
             df['city_predicted'] = self.city_model.predict(city_vec)
 
-            # 2) Предсказание региона по предсказанному городу
             city_for_region = df['city_predicted'].fillna("").astype(str)
             region_vec = self.region_vectorizer.transform(city_for_region)
             df['region_predicted'] = self.region_model.predict(region_vec)
 
-            # 3) Предсказание филиала по предсказанному городу
             city_for_branch = df['city_predicted'].fillna("").astype(str)
             branch_vec = self.branch_vectorizer.transform(city_for_branch)
             df['branch_predicted'] = self.branch_model.predict(branch_vec)

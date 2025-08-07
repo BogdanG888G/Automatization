@@ -314,6 +314,28 @@ class X5TableProcessor:
         if not cls.enrichment_models_loaded:
             cls._load_enrichment_models()
 
+        # Регулярка для извлечения веса из product_name
+        weight_pattern = re.compile(
+            r'(\d+(?:[.,]\d+)?)[ ]?(г(?:р|рамм)?|кг|кг\.|гр|грамм)',
+            flags=re.IGNORECASE
+        )
+
+        def extract_weight(text):
+            match = weight_pattern.search(text)
+            if match:
+                value = match.group(1).replace(',', '.')
+                unit = match.group(2).lower()
+                try:
+                    value_float = float(value)
+                    if 'кг' in unit:
+                        return value_float * 1000  # граммы
+                    else:
+                        return value_float
+                except Exception as e:
+                    logger.warning(f"Ошибка преобразования веса: {e}")
+                    return None
+            return None
+
         # Обогащение по product_name
         if 'product_name' in df.columns:
             product_names = df['product_name'].fillna("")
@@ -330,6 +352,9 @@ class X5TableProcessor:
             df['flavor_predicted'] = predict_product_attr(cls.flavor_model, cls.flavor_vectorizer)
             df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
             df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
+
+            # Добавляем извлечённый из текста вес
+            df['weight_extracted'] = product_names.apply(extract_weight)
 
         # Обогащение по адресу — ищем колонку, где в названии есть "add" (например, "address", "Адрес")
         address_col_candidates = [c for c in df.columns if 'add' in c.lower()]
@@ -361,7 +386,6 @@ class X5TableProcessor:
                 df['branch_predicted'] = [""] * len(city_inputs)
 
         return df
-
 
     @classmethod
     def process_data_chunk(cls, df: pd.DataFrame, file_name: str, is_first_chunk: bool) -> pd.DataFrame:

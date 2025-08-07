@@ -22,7 +22,7 @@ def train_flavor_model():
     if not os.path.exists(INPUT_CSV):
         raise FileNotFoundError(f"Файл {INPUT_CSV} не найден.")
 
-    df = pd.read_csv(INPUT_CSV, sep=';')
+    df = pd.read_csv(INPUT_CSV, sep=';').drop_duplicates()
     df.dropna(subset=['product_name', 'flavor'], inplace=True)
     if df.empty:
         raise ValueError("Датасет пуст после удаления пропусков.")
@@ -33,6 +33,16 @@ def train_flavor_model():
     X = df['product_name']
     y = df['flavor']
 
+    # Считаем частоты
+    value_counts = y.value_counts()
+
+    # Оставляем только те, у кого хотя бы 2 наблюдения
+    valid_classes = value_counts[value_counts >= 2].index
+
+    # Фильтруем X и y
+    X = X[y.isin(valid_classes)]
+    y = y[y.isin(valid_classes)]
+
     # Разделение данных на train/test
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, stratify=y, test_size=0.2, random_state=42
@@ -41,7 +51,7 @@ def train_flavor_model():
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 3),
         max_features=5000,
-        stop_words='russian',
+        stop_words=None,
         min_df=3,  # слова должны встречаться минимум в 3 документах
         max_df=0.9 # слова встречающиеся более чем в 90% документов исключаем
     )

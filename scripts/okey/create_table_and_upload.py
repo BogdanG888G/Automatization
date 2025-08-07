@@ -82,9 +82,31 @@ class OkeyTableProcessor:
 
         self.enrichment_models_loaded = True
 
+
     def _enrich_product_data(self, df: pd.DataFrame) -> pd.DataFrame:
         if not self.enrichment_models_loaded:
             self._load_enrichment_models()
+
+        # Функция для извлечения веса из строки с product_name
+        weight_pattern = re.compile(
+            r'(\d+(?:[.,]\d+)?)[ ]?(г(?:р|рамм)?|кг|кг\.|гр|грамм)',
+            flags=re.IGNORECASE
+        )
+
+        def extract_weight(text):
+            match = weight_pattern.search(text)
+            if match:
+                value = match.group(1).replace(',', '.')
+                unit = match.group(2).lower()
+                try:
+                    value_float = float(value)
+                    if 'кг' in unit:
+                        return value_float * 1000  # перевод в граммы
+                    else:
+                        return value_float
+                except:
+                    return None
+            return None
 
         # Обогащение product_name
         if 'product_name' in df.columns:
@@ -101,6 +123,9 @@ class OkeyTableProcessor:
             df['flavor_predicted'] = predict(self.flavor_model, self.flavor_vectorizer)
             df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer)
             df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
+
+            # Новый столбец с извлечённым весом из product_name
+            df['weight_extracted'] = product_names.apply(extract_weight)
 
         # Обогащение по адресу
         address_col_candidates = [c for c in df.columns if any(k in c.lower() for k in ['адрес', 'address'])]
@@ -130,8 +155,6 @@ class OkeyTableProcessor:
                 df['branch_predicted'] = [""] * len(city_inputs)
 
         return df
-
-
 
 
     # ------------------------------------------------------------------

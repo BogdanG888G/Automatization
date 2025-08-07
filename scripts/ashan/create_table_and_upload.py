@@ -364,6 +364,25 @@ def read_excel_stream(file_path: str, sheet_name: str, chunk_size: int) -> Itera
     if chunk:
         yield pd.DataFrame(chunk, columns=headers)
 
+weight_pattern = re.compile(r'(\d+(?:[.,]\d+)?)[ ]?(г|гр|грамм|кг|кгм)', re.IGNORECASE)
+
+def extract_weight(text):
+    if not isinstance(text, str):
+        return None
+    match = weight_pattern.search(text)
+    if match:
+        number = match.group(1).replace(',', '.')
+        unit = match.group(2).lower()
+        try:
+            weight_val = float(number)
+            # Приведём к граммам, если килограммы
+            if 'кг' in unit:
+                weight_val *= 1000
+            return int(weight_val)
+        except:
+            return None
+    return None
+
 
 # ------------------------------------------------------------------ #
 # Processor                                                           #
@@ -477,6 +496,9 @@ class AshanTableProcessor:
 
         product_col = name_col_candidates[0]
         df['product_name'] = df[product_col]
+
+        df['weight_extracted_regex'] = df['product_name'].apply(extract_weight)
+
 
         model_dir = "ml_models/product_enrichment"
         model_paths = {

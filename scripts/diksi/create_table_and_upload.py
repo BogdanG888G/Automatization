@@ -43,6 +43,47 @@ class TableProcessorDiksi:
         product_col = name_col_candidates[0]
         df['товар'] = df[product_col]
 
+        # --- Вставляем функцию и паттерн для веса ---
+        weight_pattern = re.compile(
+            r'(?<!\d)(\d{1,3}(?:[.,]\d{1,3})?)\s*(кг|кгм|грамм(?:а|ов)?|гр|г|шт|штук|упак(?:овка|ка)?|пачк(?:а|и|у)?)(?!\w)', 
+            flags=re.IGNORECASE
+        )
+
+        def extract_weight(text):
+            if not isinstance(text, str):
+                return None
+
+            matches = weight_pattern.findall(text)
+            if not matches:
+                numbers = re.findall(r'(?<!\d)(\d{2,4})(?!\d)', text)
+                if numbers:
+                    try:
+                        return int(numbers[0])
+                    except:
+                        return None
+                return None
+
+            weights = []
+            for number, unit in matches:
+                try:
+                    num = float(number.replace(',', '.'))
+                    unit = unit.lower()
+                    if 'кг' in unit:
+                        num *= 1000
+                    elif 'шт' in unit or 'штук' in unit or 'упак' in unit or 'пачк' in unit:
+                        continue
+                    weights.append(int(num))
+                except:
+                    continue
+
+            if weights:
+                return max(weights)
+            else:
+                return None
+
+        # Добавляем колонку с весом, выделенным регуляркой
+        df['weight_extracted_regex'] = df['товар'].apply(extract_weight)
+
         model_product_dir = "ml_models/product_enrichment"
         model_address_dir = "ml_models/address_enrichment"
         model_paths = {
