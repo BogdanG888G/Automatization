@@ -331,25 +331,37 @@ class X5TableProcessor:
             df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
             df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
 
-        # Обогащение по адресу — ищем колонку, где в названии есть "адрес" (регистр игнорируем)
+        # Обогащение по адресу — ищем колонку, где в названии есть "add" (например, "address", "Адрес")
         address_col_candidates = [c for c in df.columns if 'add' in c.lower()]
         if address_col_candidates:
             address_col = address_col_candidates[0]
             addresses = df[address_col].fillna("")
 
-            def predict_address_attr(model, vectorizer):
-                try:
-                    X_vec = vectorizer.transform(addresses)
-                    return model.predict(X_vec)
-                except Exception as e:
-                    logger.warning(f"Ошибка предсказания по адресу: {e}")
-                    return [""] * len(addresses)
+            try:
+                X_city = cls.city_vectorizer.transform(addresses)
+                df['city_predicted'] = cls.city_model.predict(X_city)
+            except Exception as e:
+                logger.warning(f"Ошибка предсказания города: {e}")
+                df['city_predicted'] = [""] * len(addresses)
 
-            df['city_predicted'] = predict_address_attr(cls.city_model, cls.city_vectorizer)
-            df['region_predicted'] = predict_address_attr(cls.region_model, cls.region_vectorizer)
-            df['branch_predicted'] = predict_address_attr(cls.branch_model, cls.branch_vectorizer)
+            city_inputs = df['city_predicted'].fillna("").astype(str)
+
+            try:
+                X_region = cls.region_vectorizer.transform(city_inputs)
+                df['region_predicted'] = cls.region_model.predict(X_region)
+            except Exception as e:
+                logger.warning(f"Ошибка предсказания региона: {e}")
+                df['region_predicted'] = [""] * len(city_inputs)
+
+            try:
+                X_branch = cls.branch_vectorizer.transform(city_inputs)
+                df['branch_predicted'] = cls.branch_model.predict(X_branch)
+            except Exception as e:
+                logger.warning(f"Ошибка предсказания филиала: {e}")
+                df['branch_predicted'] = [""] * len(city_inputs)
 
         return df
+
 
     @classmethod
     def process_data_chunk(cls, df: pd.DataFrame, file_name: str, is_first_chunk: bool) -> pd.DataFrame:

@@ -30,7 +30,6 @@ class TableProcessorDiksi:
             'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'
         ])}
     }
-
     @staticmethod
     def enrich_with_ml_models(df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -68,7 +67,7 @@ class TableProcessorDiksi:
                 logger.warning(f"[Diksi] Не удалось обогатить '{col_name}': {e}")
 
         # =============================
-        # Обогащение по адресу
+        # Обогащение по адресу с цепочкой предсказаний
         # =============================
         address_col_candidates = [c for c in df.columns if 'адрес' in c.lower()]
         if not address_col_candidates:
@@ -78,20 +77,27 @@ class TableProcessorDiksi:
         address_col = address_col_candidates[0]
         df['адрес'] = df[address_col]
 
-        address_model_paths = {
-            'predicted_city': ("city_model.pkl", "city_vectorizer.pkl"),
-            'predicted_region': ("region_model.pkl", "region_vectorizer.pkl"),
-            'predicted_branch': ("branch_model.pkl", "branch_vectorizer.pkl"),
-        }
+        try:
+            # 1) Предсказание города по адресу
+            city_model = load_pickle(os.path.join(model_address_dir, "city_model.pkl"))
+            city_vectorizer = load_pickle(os.path.join(model_address_dir, "city_vectorizer.pkl"))
+            vec_city = city_vectorizer.transform(df['адрес'].astype(str))
+            df['predicted_city'] = city_model.predict(vec_city)
 
-        for col_name, (model_file, vec_file) in address_model_paths.items():
-            try:
-                model = load_pickle(os.path.join(model_address_dir, model_file))
-                vectorizer = load_pickle(os.path.join(model_address_dir, vec_file))
-                vec = vectorizer.transform(df['адрес'].astype(str))
-                df[col_name] = model.predict(vec)
-            except Exception as e:
-                logger.warning(f"[Diksi] Не удалось обогатить '{col_name}': {e}")
+            # 2) Предсказание региона по предсказанному городу
+            region_model = load_pickle(os.path.join(model_address_dir, "region_model.pkl"))
+            region_vectorizer = load_pickle(os.path.join(model_address_dir, "region_vectorizer.pkl"))
+            vec_region = region_vectorizer.transform(df['predicted_city'].astype(str))
+            df['predicted_region'] = region_model.predict(vec_region)
+
+            # 3) Предсказание филиала по предсказанному городу
+            branch_model = load_pickle(os.path.join(model_address_dir, "branch_model.pkl"))
+            branch_vectorizer = load_pickle(os.path.join(model_address_dir, "branch_vectorizer.pkl"))
+            vec_branch = branch_vectorizer.transform(df['predicted_city'].astype(str))
+            df['predicted_branch'] = branch_model.predict(vec_branch)
+
+        except Exception as e:
+            logger.warning(f"[Diksi] Ошибка при предсказании по адресу: {e}")
 
         return df
 

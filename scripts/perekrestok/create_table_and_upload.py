@@ -304,22 +304,32 @@ class PerekrestokTableProcessor:
             df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
             df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
 
-        # Обогащение по адресу
+        # Обогащение по адресу → город → регион и филиал
         if 'address' in df.columns:
             addresses = df['address'].fillna("")
 
-            def predict_address_attr(model, vectorizer):
-                try:
-                    X_vec = vectorizer.transform(addresses)
-                    return model.predict(X_vec)
-                except Exception:
-                    return [""] * len(addresses)
+            try:
+                X_city = cls.city_vectorizer.transform(addresses)
+                df['city_predicted'] = cls.city_model.predict(X_city)
+            except Exception:
+                df['city_predicted'] = [""] * len(addresses)
 
-            df['city_predicted'] = predict_address_attr(cls.city_model, cls.city_vectorizer)
-            df['region_predicted'] = predict_address_attr(cls.region_model, cls.region_vectorizer)
-            df['branch_predicted'] = predict_address_attr(cls.branch_model, cls.branch_vectorizer)
+            city_inputs = df['city_predicted'].fillna("").astype(str)
+
+            try:
+                X_region = cls.region_vectorizer.transform(city_inputs)
+                df['region_predicted'] = cls.region_model.predict(X_region)
+            except Exception:
+                df['region_predicted'] = [""] * len(city_inputs)
+
+            try:
+                X_branch = cls.branch_vectorizer.transform(city_inputs)
+                df['branch_predicted'] = cls.branch_model.predict(X_branch)
+            except Exception:
+                df['branch_predicted'] = [""] * len(city_inputs)
 
         return df
+
 
 
     @classmethod

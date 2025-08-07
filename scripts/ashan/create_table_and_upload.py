@@ -511,26 +511,27 @@ class AshanTableProcessor:
         try:
             model_dir_address = "ml_models/address_enrichment"
 
-            # Город
+            # 1) Предсказание города по адресу
             city_model = load_pickle(os.path.join(model_dir_address, "city_model.pkl"))
             city_vectorizer = load_pickle(os.path.join(model_dir_address, "city_vectorizer.pkl"))
             vec_city = city_vectorizer.transform(df[address_col].astype(str))
             df['city_predicted'] = city_model.predict(vec_city)
 
-            # Регион
+            # 2) Предсказание региона по предсказанному городу
             region_model = load_pickle(os.path.join(model_dir_address, "region_model.pkl"))
             region_vectorizer = load_pickle(os.path.join(model_dir_address, "region_vectorizer.pkl"))
-            vec_region = region_vectorizer.transform(df[address_col].astype(str))
+            vec_region = region_vectorizer.transform(df['city_predicted'].astype(str))
             df['region_predicted'] = region_model.predict(vec_region)
 
-            # Филиал
+            # 3) Предсказание филиала по предсказанному городу
             branch_model = load_pickle(os.path.join(model_dir_address, "branch_model.pkl"))
             branch_vectorizer = load_pickle(os.path.join(model_dir_address, "branch_vectorizer.pkl"))
-            vec_branch = branch_vectorizer.transform(df[address_col].astype(str))
+            vec_branch = branch_vectorizer.transform(df['city_predicted'].astype(str))
             df['branch_predicted'] = branch_model.predict(vec_branch)
 
         except Exception as e:
             logger.warning(f"[Ashan] Ошибка при предсказании по адресу: {e}")
+
 
         return df
 

@@ -83,41 +83,54 @@ class OkeyTableProcessor:
         self.enrichment_models_loaded = True
 
     def _enrich_product_data(self, df: pd.DataFrame) -> pd.DataFrame:
-            if not self.enrichment_models_loaded:
-                self._load_enrichment_models()
+        if not self.enrichment_models_loaded:
+            self._load_enrichment_models()
 
-            if 'product_name' in df.columns:
-                product_names = df['product_name'].fillna("")
+        # Обогащение product_name
+        if 'product_name' in df.columns:
+            product_names = df['product_name'].fillna("")
 
-                def predict(model, vectorizer):
-                    try:
-                        X_vec = vectorizer.transform(product_names)
-                        return model.predict(X_vec)
-                    except Exception:
-                        return [""] * len(product_names)
+            def predict(model, vectorizer):
+                try:
+                    X_vec = vectorizer.transform(product_names)
+                    return model.predict(X_vec)
+                except Exception:
+                    return [""] * len(product_names)
 
-                df['brand_predicted'] = predict(self.brand_model, self.brand_vectorizer)
-                df['flavor_predicted'] = predict(self.flavor_model, self.flavor_vectorizer)
-                df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer)
-                df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
+            df['brand_predicted'] = predict(self.brand_model, self.brand_vectorizer)
+            df['flavor_predicted'] = predict(self.flavor_model, self.flavor_vectorizer)
+            df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer)
+            df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
 
-            address_col_candidates = [c for c in df.columns if any(k in c.lower() for k in ['адрес', 'address'])]
-            if address_col_candidates:
-                address_col = address_col_candidates[0]
-                addresses = df[address_col].fillna("")
+        # Обогащение по адресу
+        address_col_candidates = [c for c in df.columns if any(k in c.lower() for k in ['адрес', 'address'])]
+        if address_col_candidates:
+            address_col = address_col_candidates[0]
+            addresses = df[address_col].fillna("")
 
-                def predict_address(model, vectorizer):
-                    try:
-                        X_vec = vectorizer.transform(addresses)
-                        return model.predict(X_vec)
-                    except Exception:
-                        return [""] * len(addresses)
+            try:
+                X_city = self.city_vectorizer.transform(addresses)
+                df['city_predicted'] = self.city_model.predict(X_city)
+            except Exception:
+                df['city_predicted'] = [""] * len(addresses)
 
-                df['city_predicted'] = predict_address(self.city_model, self.city_vectorizer)
-                df['region_predicted'] = predict_address(self.region_model, self.region_vectorizer)
-                df['branch_predicted'] = predict_address(self.branch_model, self.branch_vectorizer)
+            # Далее — предсказания по city_predicted
+            city_inputs = df['city_predicted'].fillna("").astype(str)
 
-            return df
+            try:
+                X_region = self.region_vectorizer.transform(city_inputs)
+                df['region_predicted'] = self.region_model.predict(X_region)
+            except Exception:
+                df['region_predicted'] = [""] * len(city_inputs)
+
+            try:
+                X_branch = self.branch_vectorizer.transform(city_inputs)
+                df['branch_predicted'] = self.branch_model.predict(X_branch)
+            except Exception:
+                df['branch_predicted'] = [""] * len(city_inputs)
+
+        return df
+
 
 
 

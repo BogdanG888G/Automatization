@@ -75,7 +75,7 @@ def train_city_model():
         raise FileNotFoundError(f"❌ Файл не найден: {INPUT_CSV}")
 
     try:
-        df = pd.read_csv(INPUT_CSV, sep=';').dropna().drop_duplicates().head(10000)
+        df = pd.read_csv(INPUT_CSV, sep=';').dropna().drop_duplicates()
         logging.info(f"🔍 Всего строк: {len(df)}")
     except Exception as e:
         raise ValueError(f"❌ Ошибка при загрузке CSV: {str(e)}")
@@ -117,7 +117,7 @@ def train_city_model():
 
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 3),
-        max_features=5000,
+        max_features=2000,
         min_df=2,
         max_df=0.9
     )
