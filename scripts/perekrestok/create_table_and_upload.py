@@ -42,6 +42,7 @@ class PerekrestokTableProcessor:
     # ------------------------------------------------------------------ #
     # Period / metadata extraction                                       #
     # ------------------------------------------------------------------ #
+
     @classmethod
     def extract_perek_metadata(cls, source: str) -> Tuple[Optional[int], Optional[int]]:
 
@@ -256,6 +257,31 @@ class PerekrestokTableProcessor:
             raise
 
     @classmethod
+    def _load_enrichment_models(cls):
+        def load_model_and_vectorizer(model_name: str, folder: str):
+            with open(f"{folder}/{model_name}_model.pkl", "rb") as f_model:
+                model = pickle.load(f_model)
+            with open(f"{folder}/{model_name}_vectorizer.pkl", "rb") as f_vec:
+                vectorizer = pickle.load(f_vec)
+            return model, vectorizer
+
+        product_dir = "ml_models/product_enrichment"
+        address_dir = "ml_models/address_enrichment"
+
+        cls.brand_model, cls.brand_vectorizer = load_model_and_vectorizer("brand", product_dir)
+        cls.flavor_model, cls.flavor_vectorizer = load_model_and_vectorizer("flavor", product_dir)
+        cls.weight_model, cls.weight_vectorizer = load_model_and_vectorizer("weight", product_dir)
+        cls.type_model, cls.type_vectorizer = load_model_and_vectorizer("type", product_dir)
+
+        cls.city_model, cls.city_vectorizer = load_model_and_vectorizer("city", address_dir)
+        cls.region_model, cls.region_vectorizer = load_model_and_vectorizer("region", address_dir)
+        cls.branch_model, cls.branch_vectorizer = load_model_and_vectorizer("branch", address_dir)
+
+        cls.enrichment_models_loaded = True
+
+
+
+    @classmethod
     def _enrich_product_data(cls, df: pd.DataFrame) -> pd.DataFrame:
         # Загружаем модели один раз
         if not cls.enrichment_models_loaded:
@@ -281,27 +307,19 @@ class PerekrestokTableProcessor:
                 except:
                     return None
             return None
-        
+
         def extract_packaging_type(product_name):
             if not isinstance(product_name, str):
                 return None
-            
             text = product_name.lower()
-
-            tube_keywords = ["туба", "тубус", "tube", "can"]  # ключевые слова
+            tube_keywords = ["туба", "тубус", "tube", "can"]
             tube_brands = ["pringles", "stax", "lays stax", "big bon chips", "just brutal"]
 
-            # 1. По ключевым словам
             if any(word in text for word in tube_keywords):
                 return "Туба"
-
-            # 2. По брендам
             if any(brand in text for brand in tube_brands):
                 return "Туба"
-            
             return "Пакет"
-        
-
 
         # Обогащение по product_name
         if 'product_name' in df.columns:
@@ -319,7 +337,6 @@ class PerekrestokTableProcessor:
             df['weight_predicted'] = predict_product_attr(cls.weight_model, cls.weight_vectorizer)
             df['type_predicted'] = predict_product_attr(cls.type_model, cls.type_vectorizer)
 
-            # Добавляем столбец с извлечённым из текста весом
             df['weight_extracted'] = product_names.apply(extract_weight)
             df['package_type'] = product_names.apply(extract_packaging_type)
 
@@ -349,11 +366,9 @@ class PerekrestokTableProcessor:
 
         return df
 
-
-
     @classmethod
     def _process_and_insert_chunk(cls, df, table_name, fname_month, fname_year, engine, create_table: bool):
-        # Нормализация и очистка
+        # Предполагаю, что normalize_perek_columns и extract_perek_metadata уже реализованы
         df = cls.normalize_perek_columns(df)
 
         month, year = fname_month, fname_year
@@ -367,7 +382,6 @@ class PerekrestokTableProcessor:
 
         df = df.fillna('')
 
-        # Векторная очистка строковых столбцов
         for col in df.columns:
             if df[col].dtype == 'object':
                 df[col] = (
@@ -377,17 +391,11 @@ class PerekrestokTableProcessor:
                         .str.replace('\n', ' ', regex=False)
                 )
 
-        # --------------------------- #
-        # 🔥 Обогащение товара и адреса
-        # --------------------------- #
         try:
             df = cls._enrich_product_data(df)
         except Exception as e:
             print(f"[WARN] Не удалось обогатить данные: {e}")
 
-        # --------------------------- #
-        # 🧱 Создание таблицы при необходимости
-        # --------------------------- #
         if create_table:
             with engine.begin() as conn:
                 exists = conn.execute(
@@ -399,10 +407,8 @@ class PerekrestokTableProcessor:
                     create_sql = f"CREATE TABLE raw.{table_name} ({', '.join(cols_sql)})"
                     conn.execute(text(create_sql))
 
-        # --------------------------- #
-        # 🚀 Вставка
-        # --------------------------- #
         cls.bulk_insert_perek(df, table_name, engine)
+
 
     # ------------------------------------------------------------------ #
     # Main processing                                                     #
