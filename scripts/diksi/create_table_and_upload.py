@@ -84,6 +84,29 @@ class TableProcessorDiksi:
         # Добавляем колонку с весом, выделенным регуляркой
         df['weight_extracted_regex'] = df['товар'].apply(extract_weight)
 
+        
+        def extract_packaging_type(product_name):
+            if not isinstance(product_name, str):
+                return None
+            
+            text = product_name.lower()
+
+            tube_keywords = ["туба", "тубус", "tube", "can"]  # ключевые слова
+            tube_brands = ["pringles", "stax", "lays stax", "big bon chips", "just brutal"]
+
+            # 1. По ключевым словам
+            if any(word in text for word in tube_keywords):
+                return "Туба"
+
+            # 2. По брендам
+            if any(brand in text for brand in tube_brands):
+                return "Туба"
+            
+            return "Пакет"
+        
+        df['package_type'] = df['товар'].apply(extract_packaging_type)
+
+
         model_product_dir = "ml_models/product_enrichment"
         model_address_dir = "ml_models/address_enrichment"
         model_paths = {

@@ -384,6 +384,27 @@ def extract_weight(text):
     return None
 
 
+def extract_packaging_type(product_name):
+    if not isinstance(product_name, str):
+        return None
+    
+    text = product_name.lower()
+
+    tube_keywords = ["туба", "тубус", "tube", "can"]  # ключевые слова
+    tube_brands = ["pringles", "stax", "lays stax", "big bon chips", "just brutal"]
+
+    # 1. По ключевым словам
+    if any(word in text for word in tube_keywords):
+        return "Туба"
+
+    # 2. По брендам
+    if any(brand in text for brand in tube_brands):
+        return "Туба"
+    
+    return "Пакет"
+
+
+
 # ------------------------------------------------------------------ #
 # Processor                                                           #
 # ------------------------------------------------------------------ #
@@ -499,6 +520,7 @@ class AshanTableProcessor:
 
         df['weight_extracted_regex'] = df['product_name'].apply(extract_weight)
 
+        df['package_type'] = df['product_name'].apply(extract_packaging_type)
 
         model_dir = "ml_models/product_enrichment"
         model_paths = {

@@ -497,6 +497,27 @@ class MagnitTableProcessor:
             return None
 
         return weight
+    
+    def extract_packaging_type(product_name):
+        if not isinstance(product_name, str):
+            return None
+        
+        text = product_name.lower()
+
+        tube_keywords = ["туба", "тубус", "tube", "can"]  # ключевые слова
+        tube_brands = ["pringles", "stax", "lays stax", "big bon chips", "just brutal"]
+
+        # 1. По ключевым словам
+        if any(word in text for word in tube_keywords):
+            return "Туба"
+
+        # 2. По брендам
+        if any(brand in text for brand in tube_brands):
+            return "Туба"
+        
+        return "Пакет"
+        
+
 
     def _enrich_product_data(self, df: pd.DataFrame) -> pd.DataFrame:
         if 'product_name' in df.columns:
@@ -513,6 +534,7 @@ class MagnitTableProcessor:
 
             # Добавим свой столбец с весом из названия
             df['weight_extracted'] = df['product_name'].apply(self.extract_weight_from_name)
+            df['package_type'] = df['product_name'].apply(self.extract_packaging_type)
 
         # Обогащение по адресу
         address_col_candidates = [c for c in df.columns if any(key in c.lower() for key in ['адрес', 'address'])]

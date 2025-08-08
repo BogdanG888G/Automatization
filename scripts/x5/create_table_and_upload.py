@@ -335,6 +335,26 @@ class X5TableProcessor:
                     logger.warning(f"Ошибка преобразования веса: {e}")
                     return None
             return None
+        
+        def extract_packaging_type(product_name):
+            if not isinstance(product_name, str):
+                return None
+            
+            text = product_name.lower()
+
+            tube_keywords = ["туба", "тубус", "tube", "can"]  # ключевые слова
+            tube_brands = ["pringles", "stax", "lays stax", "big bon chips", "just brutal"]
+
+            # 1. По ключевым словам
+            if any(word in text for word in tube_keywords):
+                return "Туба"
+
+            # 2. По брендам
+            if any(brand in text for brand in tube_brands):
+                return "Туба"
+            
+            return "Пакет"
+        
 
         # Обогащение по product_name
         if 'product_name' in df.columns:
@@ -355,6 +375,7 @@ class X5TableProcessor:
 
             # Добавляем извлечённый из текста вес
             df['weight_extracted'] = product_names.apply(extract_weight)
+            df['package_type'] = product_names.apply(extract_packaging_type)
 
         # Обогащение по адресу — ищем колонку, где в названии есть "add" (например, "address", "Адрес")
         address_col_candidates = [c for c in df.columns if 'add' in c.lower()]
