@@ -26,7 +26,7 @@ DEFAULT_CONN_STAGE = (
 class OkeyConfig:
     MAX_CONCURRENT_TASKS = 4
     MAX_FILES_PER_RUN = 8
-    TASK_TIMEOUT = timedelta(minutes=45)
+    TASK_TIMEOUT = timedelta(minutes=60)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
 
     DATA_DIR = "/opt/airflow/data"
@@ -203,7 +203,7 @@ with DAG(
     dag_id="okey_sales_pipeline",
     default_args=default_args,
     start_date=datetime(2025, 7, 1),
-    schedule_interval=None,
+    schedule_interval="0 11 * * *",  # каждый день в 15:00
     catchup=False,
     max_active_tasks=OkeyConfig.MAX_CONCURRENT_TASKS,
     concurrency=OkeyConfig.MAX_CONCURRENT_TASKS,

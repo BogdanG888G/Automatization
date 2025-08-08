@@ -25,9 +25,9 @@ DEFAULT_CONN_STAGE = (
 
 class MagnitConfig:
     MAX_CONCURRENT_TASKS = 2
-    MAX_FILES_PER_RUN = 4
-    TASK_TIMEOUT = timedelta(minutes=120)
-    MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
+    MAX_FILES_PER_RUN = 8
+    TASK_TIMEOUT = timedelta(minutes=1200)
+    MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 3GB
     POOL_SLOTS = 8  # Увеличить с 6
 
     DATA_DIR = "/opt/airflow/data"
@@ -337,7 +337,7 @@ with DAG(
     dag_id="magnit_sales_pipeline_optimized",
     default_args=default_args,
     start_date=datetime(2025, 7, 1),
-    schedule_interval=None,
+    schedule_interval="0 15 * * *",  # каждый день в 15:00,
     catchup=False,
     max_active_tasks=MagnitConfig.MAX_CONCURRENT_TASKS,
     concurrency=MagnitConfig.MAX_CONCURRENT_TASKS,

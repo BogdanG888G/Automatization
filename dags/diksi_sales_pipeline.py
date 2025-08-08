@@ -60,7 +60,7 @@ DEFAULT_CONN_STAGE = (
 class DiksiConfig:
     MAX_CONCURRENT_TASKS = 4
     MAX_FILES_PER_RUN = 8
-    TASK_TIMEOUT = timedelta(minutes=45)
+    TASK_TIMEOUT = timedelta(minutes=360)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
 
     DATA_DIR = "/opt/airflow/data"
@@ -557,7 +557,7 @@ with DAG(
     dag_id="diksi_sales_pipeline_optimized",
     default_args=_default_args(),
     start_date=datetime(2025, 7, 1),
-    schedule_interval=None,  # triggered manually / externally
+    schedule_interval="0 20 * * *",  # каждый день в 15:00,  # triggered manually / externally
     catchup=False,
     max_active_tasks=DiksiConfig.MAX_CONCURRENT_TASKS,
     concurrency=DiksiConfig.MAX_CONCURRENT_TASKS,
