@@ -87,7 +87,6 @@ class OkeyTableProcessor:
         if not self.enrichment_models_loaded:
             self._load_enrichment_models()
 
-        # Функция для извлечения веса из строки с product_name
         weight_pattern = re.compile(
             r'(\d+(?:[.,]\d+)?)[ ]?(г(?:р|рамм)?|кг|кг\.|гр|грамм)',
             flags=re.IGNORECASE
@@ -101,7 +100,7 @@ class OkeyTableProcessor:
                 try:
                     value_float = float(value)
                     if 'кг' in unit:
-                        return value_float * 1000  # перевод в граммы
+                        return value_float * 1000
                     else:
                         return value_float
                 except:
@@ -114,24 +113,18 @@ class OkeyTableProcessor:
             
             text = product_name.lower()
 
-            tube_keywords = ["туба", "тубус", "tube", "can"]  # ключевые слова
+            tube_keywords = ["туба", "тубус", "tube", "can"]
             tube_brands = ["pringles", "stax", "lays stax", "big bon chips", "just brutal"]
 
-            # 1. По ключевым словам
             if any(word in text for word in tube_keywords):
                 return "Туба"
-
-            # 2. По брендам
             if any(brand in text for brand in tube_brands):
                 return "Туба"
-            
             return "Пакет"
-        
-        df['package_type'] = product_names.apply(extract_packaging_type)
 
-        # Обогащение product_name
         if 'product_name' in df.columns:
             product_names = df['product_name'].fillna("")
+            df['package_type'] = product_names.apply(extract_packaging_type)
 
             def predict(model, vectorizer):
                 try:
@@ -145,8 +138,15 @@ class OkeyTableProcessor:
             df['weight_predicted'] = predict(self.weight_model, self.weight_vectorizer)
             df['type_predicted'] = predict(self.type_model, self.type_vectorizer)
 
-            # Новый столбец с извлечённым весом из product_name
             df['weight_extracted'] = product_names.apply(extract_weight)
+        else:
+            # Если столбца product_name нет, можно инициализировать новые колонки пустыми
+            df['package_type'] = None
+            df['brand_predicted'] = None
+            df['flavor_predicted'] = None
+            df['weight_predicted'] = None
+            df['type_predicted'] = None
+            df['weight_extracted'] = None
 
         # Обогащение по адресу
         address_col_candidates = [c for c in df.columns if any(k in c.lower() for k in ['адрес', 'address'])]
@@ -160,7 +160,6 @@ class OkeyTableProcessor:
             except Exception:
                 df['city_predicted'] = [""] * len(addresses)
 
-            # Далее — предсказания по city_predicted
             city_inputs = df['city_predicted'].fillna("").astype(str)
 
             try:
@@ -174,8 +173,13 @@ class OkeyTableProcessor:
                 df['branch_predicted'] = self.branch_model.predict(X_branch)
             except Exception:
                 df['branch_predicted'] = [""] * len(city_inputs)
+        else:
+            df['city_predicted'] = None
+            df['region_predicted'] = None
+            df['branch_predicted'] = None
 
         return df
+
 
 
     # ------------------------------------------------------------------
@@ -324,47 +328,55 @@ class OkeyTableProcessor:
             raise
 
 
+
     def _process_and_insert_chunk(self, df, table_name, fname_month, fname_year, engine, create_table: bool):
-            df = self.normalize_okey_columns(df)
+        df = self.normalize_okey_columns(df)
 
-            # Метаданные
-            if (fname_month is None or fname_year is None) and 'period' in df.columns and not df['period'].isna().all():
-                m2, y2 = self.extract_okey_metadata(str(df['period'].iloc[0]))
-                fname_month = fname_month or m2
-                fname_year = fname_year or y2
+        # Метаданные
+        if (fname_month is None or fname_year is None) and 'period' in df.columns and not df['period'].isna().all():
+            m2, y2 = self.extract_okey_metadata(str(df['period'].iloc[0]))
+            fname_month = fname_month or m2
+            fname_year = fname_year or y2
 
-            if fname_month and fname_year:
-                df['sale_year'] = str(fname_year)
-                df['sale_month'] = str(fname_month).zfill(2)
+        if fname_month and fname_year:
+            df['sale_year'] = str(fname_year)
+            df['sale_month'] = str(fname_month).zfill(2)
 
-            df = df.fillna('')
-            for col in df.columns:
-                if df[col].dtype == 'object':
-                    df[col] = (
-                        df[col].str.strip()
-                            .str.replace('\u200b', '', regex=False)
-                            .str.replace('\r\n', ' ', regex=False)
-                            .str.replace('\n', ' ', regex=False)
-                    )
+        # Заполняем NaN аккуратно: для object-колонок пустой строкой, для чисел оставляем NaN
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].fillna('').astype(str).str.strip()\
+                    .str.replace('\u200b', '', regex=False)\
+                    .str.replace('\r\n', ' ', regex=False)\
+                    .str.replace('\n', ' ', regex=False)
+            else:
+                df[col] = df[col].fillna(df[col].dtype.type())  # например 0 для чисел
 
-            try:
-                df = self._enrich_product_data(df)
-            except Exception as e:
-                print(f"[WARN] Обогащение не выполнено: {e}")
+        try:
+            df = self._enrich_product_data(df)
+        except Exception as e:
+            print(f"[WARN] Обогащение не выполнено: {e}")
 
-            if create_table:
-                with engine.begin() as conn:
-                    exists = conn.execute(
-                        text("SELECT 1 FROM information_schema.tables WHERE table_schema = 'okey' AND table_name = :table"),
-                        {"table": table_name}
-                    ).scalar()
-                    if not exists:
-                        cols_sql = [f"[{col}] NVARCHAR(255)" for col in df.columns]
-                        create_sql = f"CREATE TABLE okey.{table_name} ({', '.join(cols_sql)})"
-                        conn.execute(text(create_sql))
+        if create_table:
+            with engine.begin() as conn:
+                # Проверяем существование таблицы
+                exists = conn.execute(
+                    text(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema = 'okey' AND table_name = :table"
+                    ),
+                    {"table": table_name}
+                ).scalar()
+                if not exists:
+                    # Создаем таблицу с типом NVARCHAR(MAX) вместо фиксированного NVARCHAR(255)
+                    cols_sql = [f"[{col}] NVARCHAR(MAX)" for col in df.columns]
+                    create_sql = f"CREATE TABLE okey.{table_name} ({', '.join(cols_sql)})"
+                    conn.execute(text(create_sql))
 
+        try:
             self.bulk_insert_okey(df, table_name, engine)
-
+        except Exception as e:
+            print(f"[ERROR] Ошибка при вставке данных в таблицу {table_name}: {e}")
 
 
     def bulk_insert_okey(self, df, table_name, engine):

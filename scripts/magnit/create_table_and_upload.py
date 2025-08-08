@@ -498,7 +498,7 @@ class MagnitTableProcessor:
 
         return weight
     
-    def extract_packaging_type(product_name):
+    def extract_packaging_type(self, product_name):
         if not isinstance(product_name, str):
             return None
         

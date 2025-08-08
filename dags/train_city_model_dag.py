@@ -1,3 +1,4 @@
+# 👇 Импорты
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime
@@ -5,39 +6,57 @@ import pandas as pd
 import pickle
 import os
 import re
-import logging
-from datetime import datetime
-from datetime import timedelta
+import logging  
 
-from natasha import MorphVocab, AddrExtractor
-from sklearn.feature_extraction.text import HashingVectorizer
-from sklearn.linear_model import SGDClassifier
+from natasha import (
+    MorphVocab,
+    AddrExtractor
+)
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 
+import pandas as pd
+import numpy as np
+import os
+import re
+import pickle
+import logging
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from natasha import MorphVocab, AddrExtractor
+
+# Natasha init
 morph_vocab = MorphVocab()
 addr_extractor = AddrExtractor(morph_vocab)
 
 def normalize_address(text: str) -> str:
+    """Приведение адреса к единому виду"""
+
     if not isinstance(text, str):
         return ""
     text = text.lower()
-    # Немного упростил замену, убрал сложные паттерны
-    replacements = {
-        'г.': 'город ',
-        'гор': 'город ',
-        'ул': 'улица ',
-        'пр-кт': 'проспект ',
-        'респ': 'республика ',
+    replace_dict = {
+        r'\bг\.\b': 'город ',
+        r'\bгор\b': 'город ',
+        r'\bул\b': 'улица ',
+        r'\bпр-кт\b': 'проспект ',
+        r'\bресп\b': 'республика ',
     }
-    for k, v in replacements.items():
-        text = text.replace(k, v)
+    for pattern, repl in replace_dict.items():
+        text = re.sub(pattern, repl, text)
     text = re.sub(r'[«»"“”]', '', text)
     text = re.sub(r'[.,;:/\-]', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 def extract_natasha_city(text: str) -> str:
+    """Извлекает город с помощью Natasha"""
+
     try:
         matches = addr_extractor(text)
         for match in matches:
@@ -45,60 +64,64 @@ def extract_natasha_city(text: str) -> str:
                 if part.type in ("город", "city"):
                     return part.value.lower()
     except Exception:
-        return ""
+        pass
     return ""
 
 def train_city_model():
     INPUT_CSV = "ml_models/address_enrichment/labeled_address_data.csv"
-    MODEL_PATH = "ml_models/address_enrichment/city_model_sgd.pkl"
-    VECTORIZER_PATH = "ml_models/address_enrichment/city_vectorizer_hashing.pkl"
+    MODEL_PATH = "ml_models/address_enrichment/city_model.pkl"
+    VECTORIZER_PATH = "ml_models/address_enrichment/city_vectorizer.pkl"
 
-    logging.info(f"Загрузка данных из {INPUT_CSV} ...")
     if not os.path.exists(INPUT_CSV):
         raise FileNotFoundError(f"Файл не найден: {INPUT_CSV}")
 
     df = pd.read_csv(INPUT_CSV, sep=';').sample(10000).dropna().drop_duplicates()
-    logging.info(f"Исходный размер данных: {len(df)}")
-
+    
+    
+    logging.info('Приводим адреса к единому виду')
+    # Очистка адресов
     df['cleaned_address'] = df['address'].apply(normalize_address)
+    logging.info('Извлекает город с помощью Natasha')
+    
+    
+    # Natasha фича
     df['natasha_city'] = df['address'].apply(extract_natasha_city)
+    logging.info('Извлечение закончено')
 
+    # Фильтр по длине адреса
     df = df[df['cleaned_address'].str.len() > 5]
 
+    # Убираем очень редкие города
     city_counts = df['city'].value_counts()
     df = df[df['city'].isin(city_counts[city_counts >= 3].index)]
-    logging.info(f"После фильтрации по длине и частоте городов: {len(df)} строк, {df['city'].nunique()} уникальных городов")
 
+    logging.info(f"Осталось {len(df)} строк, {df['city'].nunique()} уникальных городов")
+
+    # Признаки: текст адреса + город Natasha
     df['full_features'] = df['cleaned_address'] + " natasha:" + df['natasha_city']
 
-    X = df['full_features']
-    y = df['city']
-
-    vectorizer = HashingVectorizer(
-        n_features=2**16,  # 65536 признаков
-        alternate_sign=False,
-        ngram_range=(1, 2)
+    vectorizer = TfidfVectorizer(
+        analyzer='char_wb',
+        ngram_range=(3, 6),
+        max_features=20000
     )
-    X_vec = vectorizer.transform(X)
+    X_vec = vectorizer.fit_transform(df['full_features'])
+    y = df['city']
 
     X_train, X_test, y_train, y_test = train_test_split(
         X_vec, y, test_size=0.3, random_state=42, stratify=y
     )
 
-    model = SGDClassifier(
-        loss='log',
-        max_iter=1000,
-        tol=1e-3,
+    model = LogisticRegression(
+        C=3.0,
+        max_iter=1500,
         n_jobs=-1,
-        class_weight='balanced',
-        random_state=42
+        class_weight='balanced'
     )
-    logging.info("Начинаем обучение модели SGDClassifier...")
     model.fit(X_train, y_train)
 
     y_pred = model.predict(X_test)
-    report = classification_report(y_test, y_pred, zero_division=0)
-    logging.info(f"\nОтчёт по модели:\n{report}")
+    logging.info("\n" + classification_report(y_test, y_pred, zero_division=0))
 
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
     with open(MODEL_PATH, 'wb') as f_model:
@@ -108,11 +131,12 @@ def train_city_model():
 
     logging.info("✅ Модель и векторизатор сохранены.")
 
+
+# DAG
 default_args = {
     'start_date': datetime(2023, 1, 1),
     'owner': 'airflow',
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
 }
 
 with DAG(
