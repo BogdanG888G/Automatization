@@ -32,10 +32,10 @@ DEFAULT_CONN_STAGE = (
 # ----------------------------------- #
 class X5Config:
     MAX_CONCURRENT_TASKS = 2
-    MAX_FILES_PER_RUN = 6
+    MAX_FILES_PER_RUN = 4
     TASK_TIMEOUT = timedelta(minutes=1200)
     MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 3GB
-    POOL_SLOTS = 4  # Сбалансировать с pool_size БД
+    POOL_SLOTS = 1  # Сбалансировать с pool_size БД
 
     DATA_DIR = "/opt/airflow/data"
     ARCHIVE_DIR = "/opt/airflow/archive"
@@ -49,14 +49,14 @@ class X5Config:
             pools = Variable.get("airflow_pools", default_var="default_pool")
             return "x5_file_pool" if "x5_file_pool" in pools.split(",") else "default_pool"
         except Exception:
-            return "default_pool"
+            return "default_pool"   
 
     PROCESSING_POOL = get_processing_pool()
-    POOL_SLOTS = 6
+    POOL_SLOTS = 1
 
     CONN_SETTINGS = {
-        'pool_size': 2,
-        'max_overflow': 3,
+        'pool_size': 1,
+        'max_overflow': 2,
         'pool_timeout': 30,
         'pool_recycle': 3600,
         'connect_args': {
@@ -385,7 +385,7 @@ def archive_x5_file(file_path: str):
 with DAG(
     dag_id="x5_sales_data_pipeline",
     start_date=datetime(2025, 7, 15),
-    schedule_interval="0 8 * * *",  # каждый день в 15:00
+    schedule_interval="0 8 * * *",
     catchup=False,
     max_active_runs=1,
     tags=["x5", "sales", "data"],
@@ -394,6 +394,8 @@ with DAG(
         "depends_on_past": False,
         "retries": 1,
         "retry_delay": timedelta(minutes=10),
+        "pool_slots": 1,
+        "pool": X5Config.PROCESSING_POOL,  # Используем пул с 1 слотом
     },
 ) as dag:
     start = EmptyOperator(task_id="start")
