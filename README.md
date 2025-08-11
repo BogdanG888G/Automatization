@@ -129,182 +129,139 @@ with DAG(
 ) as dag:
 ```
 
-## 📊 Форматы данных для розничных сетей
+## Документация по стандартизации данных розничных продаж
 
-### 🛒 Magnit
+### 1. Общие положения
+
+Данная документация описывает стандартный формат представления данных о розничных продажах для последующей аналитики. Все исходные таблицы должны быть преобразованы к указанному формату.
+
+### 2. Структура таблицы
+
+#### 2.1. Основные разделы данных
+
+1. **Идентификация сети**
+2. **Временные метки**
+3. **Географические данные**
+4. **Товарные характеристики**
+5. **Иерархия продуктов**
+6. **Коды и артикулы**
+7. **Данные о производителях**
+8. **Финансовые показатели**
+9. **Дополнительные метрики**
+
+#### 2.2. Детальное описание полей
+
+| Группа | Поле | Тип данных | Описание | Обязательность | Пример значения |
+|--------|------|------------|----------|----------------|-----------------|
+| **Сеть** | retail_chain | NVARCHAR(50) | Название розничной сети | Обязательно | 'Магнит' |
+| **Время** | sale_year | INT | Год продажи | Обязательно | 2024 |
+|  | sale_month | INT | Месяц продажи (1-12) | Обязательно | 12 |
+|  | sale_date | DATE | Дата продажи (первый день месяца) | Обязательно | '2024-12-01' |
+| **География** | branch | NVARCHAR(100) | Филиал/отделение | Опционально | 'Филиал Приволжский' |
+|  | region | NVARCHAR(100) | Регион | Опционально | 'Челябинская обл.' |
+|  | city | NVARCHAR(100) | Город | Опционально | 'г.Челябинск' |
+|  | address | NVARCHAR(200) | Адрес магазина | Обязательно | 'ул. Ворошилова, дом № 7' |
+|  | store_format | NVARCHAR(50) | Формат магазина | Обязательно | 'МД' |
+|  | store_name | NVARCHAR(100) | Название магазина | Обязательно | 'Скрепка' |
+| **Товар** | product_name | NVARCHAR(200) | Наименование товара | Обязательно | 'Семечки отб с морской солью' |
+|  | brand | NVARCHAR(100) | Бренд товара | Обязательно | 'От Мартина' |
+|  | flavor | NVARCHAR(100) | Вкус/аромат | Опционально | 'Соль копченая' |
+|  | weight | NVARCHAR(50) | Вес/объем | Опционально | '200' |
+|  | product_type | NVARCHAR(100) | Тип продукта | Опционально | 'Приссованные рифленые' |
+| **Иерархия** | product_level_1 | NVARCHAR(100) | Уровень 1 категории | Обязательно | 'Снэки' |
+|  | product_level_2 | NVARCHAR(100) | Уровень 2 категории | Обязательно | 'Семечки' |
+|  | product_level_3 | NVARCHAR(100) | Уровень 3 категории | Обязательно | 'Семечки подсолнечника' |
+|  | product_level_4 | NVARCHAR(100) | Уровень 4 категории | Опционально | 'Семечки подсолнечника неочищенные' |
+| **Коды** | product_family_code | INT | Код товарной группы | Опционально | NULL |
+|  | product_family_name | NVARCHAR(100) | Название товарной группы | Опционально | NULL |
+|  | product_article | BIGINT | Артикул товара | Обязательно | 1000229533 |
+|  | product_code | BIGINT | Код товара | Обязательно | 1000229533 |
+|  | barcode | NVARCHAR(50) | Штрих-код | Обязательно | '4607012351999' |
+| **Производитель** | factory_code | INT | Код завода | Опционально | NULL |
+|  | factory_name | NVARCHAR(100) | Название завода | Опционально | NULL |
+|  | material | INT | Код материала | Опционально | NULL |
+| **Поставщики** | vendor | NVARCHAR(100) | Производитель | Опционально | NULL |
+|  | supplier | NVARCHAR(100) | Поставщик | Обязательно | 'Мартин ООО' |
+|  | warehouse_supplier | NVARCHAR(100) | Склад поставщика | Опционально | NULL |
+| **Финансы** | sales_quantity | INT | Количество продаж | Обязательно | 37 |
+|  | sales_amount_rub | NUMERIC(18,2) | Сумма продаж в рублях | Обязательно | 4879.65 |
+|  | avg_cost_price | NUMERIC(18,4) | Средняя закупочная цена | Обязательно | 82.8660 |
+|  | avg_sell_price | NUMERIC(18,4) | Средняя цена продажи | Обязательно | 131.8824 |
+| **Метрики** | margin_amount_rub | NUMERIC(18,2) | Маржа (руб) | Обязательно | 1813.91 |
+|  | sales_tons | NUMERIC(18,3) | Продажи в тоннах | Опционально | 0.074 |
+|  | sales_weight_kg | NUMERIC(18,3) | Продажи в кг | Опционально | 74.000 |
+
+### 3. Правила преобразования данных
+
+#### 3.1. Общие правила
+- Все строковые значения должны обрабатываться через TRY_CAST
+- Все числовые значения должны иметь явное указание точности
+- NULL значения должны быть явно указаны для опциональных полей
+
+### 3.2. Специфичные преобразования
+
+**Для расчета средних цен:**
 ```sql
-CREATE TABLE [Stage].[magnit].[magnit_<месяц>_<год>] (
-    [month] NVARCHAR(50),
-    [format] NVARCHAR(50),
-    [store_name] NVARCHAR(255),
-    [store_id] INT,
-    [store_address] NVARCHAR(500),
-    [level_1] NVARCHAR(255),
-    [level_2] NVARCHAR(255),
-    [level_3] NVARCHAR(255),
-    [level_4] NVARCHAR(255),
-    [supplier] NVARCHAR(255),
-    [brand] NVARCHAR(255),
-    [product_name] NVARCHAR(255),
-    [product_id] NVARCHAR(50),
-    [barcode] NVARCHAR(50),
-    [revenue_rub] DECIMAL(18,2),
-    [revenue_qty] INT,
-    [purchase_price] DECIMAL(18,2)
+TRY_CAST(
+    CASE 
+        WHEN TRY_CAST(revenue_qty AS NUMERIC(18,4)) > 0 
+        THEN TRY_CAST(revenue_rub AS NUMERIC(18,4)) / TRY_CAST(revenue_qty AS NUMERIC(18,4))
+        ELSE NULL 
+    END 
+AS NUMERIC(18,4)) AS avg_sell_price
 ```
 
-### 🛒 Ashan
+**Для расчета маржи:**
 ```sql
-CREATE TABLE [Stage].[ashan].[ashan_<месяц>_<год>] (
-    [date_raw] DATE,
-    [product_name] NVARCHAR(255),
-    [store] NVARCHAR(255),
-    [city] NVARCHAR(100),
-    [address] NVARCHAR(500),
-    [month_raw] NVARCHAR(50),
-    [ср_цена_продажи] DECIMAL(18,2),
-    [списания_руб] DECIMAL(18,2),
-    [списания_шт] INT,
-    [продажи_c_ндс] DECIMAL(18,2),
-    [продажи_шт] INT,
-    [ср_цена_покупки] DECIMAL(18,2),
-    [маржа_руб] DECIMAL(18,2),
-    [потери_руб] DECIMAL(18,2),
-    [потери_шт] INT,
-    [промо_продажи_c_ндс] DECIMAL(18,2),
-    [sale_month] INT,
-    [sale_year] INT,
-    [sale_date] DATE,
-    [product_segment] NVARCHAR(100),
-    [product_family_code] NVARCHAR(50),
-    [product_family_name] NVARCHAR(255),
-    [product_article] NVARCHAR(50),
-    [supplier_code] NVARCHAR(50),
-    [supplier_name] NVARCHAR(255),
-    [store_format] NVARCHAR(50)
+TRY_CAST(
+    TRY_CAST(revenue_rub AS NUMERIC(18,4)) - 
+    (TRY_CAST(purchase_price AS NUMERIC(18,4)) * TRY_CAST(revenue_qty AS NUMERIC(18,4)))
+AS NUMERIC(18,2)) AS margin_amount_rub
 ```
 
-### 🛒 Diksi
+**Для весовых показателей:**
 ```sql
-CREATE TABLE [Stage].[diksi].[diksi_<месяц>_<год>] (
-    [sale_year] INT,
-    [sale_month] INT,
-    [level_3] NVARCHAR(255),
-    [level_4] NVARCHAR(255),
-    [level_5] NVARCHAR(255),
-    [vtm] NVARCHAR(255),
-    [product] NVARCHAR(255),
-    [address] NVARCHAR(500),
-    [product_code] NVARCHAR(50),
-    [stores] NVARCHAR(255),
-    [quantity_first_week] INT,
-    [cost_with_vat_first_week] DECIMAL(18,2),
-    [amount_with_vat_first_week] DECIMAL(18,2),
-    [quantity_second_week] INT,
-    [cost_with_vat_second_week] DECIMAL(18,2),
-    [amount_with_vat_second_week] DECIMAL(18,2),
-    [quantity_third_week] INT,
-    [cost_with_vat_third_week] DECIMAL(18,2),
-    [amount_with_vat_third_week] DECIMAL(18,2),
-    [quantity_fourth_week] INT,
-    [cost_with_vat_fourth_week] DECIMAL(18,2),
-    [amount_with_vat_fourth_week] DECIMAL(18,2),
-    [quantity_fifth_week] INT,
-    [cost_with_vat_fifth_week] DECIMAL(18,2),
-    [amount_with_vat_fifth_week] DECIMAL(18,2),
-    [quantity_summary] INT,
-    [cost_with_vat_summary] DECIMAL(18,2),
-    [amount_with_vat_summary] DECIMAL(18,2)
+-- В тоннах
+TRY_CAST(
+    CASE 
+        WHEN ISNUMERIC(weight_extracted) = 1 
+        THEN (TRY_CAST(revenue_qty AS NUMERIC(18,3)) * TRY_CAST(weight_extracted AS NUMERIC(18,3))) / 1000 
+        ELSE NULL 
+    END 
+AS NUMERIC(18,3)) AS sales_tons
+
+-- В килограммах
+TRY_CAST(
+    CASE 
+        WHEN ISNUMERIC(weight_extracted) = 1 
+        THEN TRY_CAST(revenue_qty AS NUMERIC(18,3)) * TRY_CAST(weight_extracted AS NUMERIC(18,3))
+        ELSE NULL 
+    END 
+AS NUMERIC(18,3)) AS sales_weight_kg
 ```
 
-### 🛒 Okey
-```sql
-CREATE TABLE [Stage].[okey].[okey_<месяц>_<год>] (
-    [retail_chain] NVARCHAR(50),
-    [product_category] NVARCHAR(255),
-    [product_type] NVARCHAR(255),
-    [supplier_name] NVARCHAR(255),
-    [brand] NVARCHAR(255),
-    [product_name] NVARCHAR(255),
-    [product_unified_name] NVARCHAR(255),
-    [product_weight_g] INT,
-    [product_flavor] NVARCHAR(100),
-    [sales_quantity] INT,
-    [sales_amount_rub] DECIMAL(18,2),
-    [sales_weight_kg] DECIMAL(18,3),
-    [cost_price_rub] DECIMAL(18,2),
-    [sales_month] INT,
-    [load_dt] DATETIME
-```
+### 4. Контроль качества данных
 
-### 🛒 Pereкrestok
-```sql
-CREATE TABLE [Stage].[perekrestok].[perekrestok_<месяц>_<год>] (
-    [period] DATE,
-    [retail_chain] NVARCHAR(50),
-    [category] NVARCHAR(255),
-    [supplier] NVARCHAR(255),
-    [brand] NVARCHAR(255),
-    [product_name] NVARCHAR(255),
-    [weight_g] INT,
-    [flavor] NVARCHAR(100),
-    [sale_year] INT,
-    [sale_month] INT,
-    [cost_rub] DECIMAL(18,2),
-    [sales_qty] INT,
-    [sales_rub] DECIMAL(18,2),
-    [sales_tons] DECIMAL(18,3),
-    [category_lvl2] NVARCHAR(255),
-    [product_name_uni] NVARCHAR(255)
-```
+1. **Проверка полноты**:
+   - Обязательные поля не должны содержать NULL значений
+   - Ключевые идентификаторы (product_article, barcode) должны быть уникальными
 
-### 🛒 Pyaterochka
-```sql
-CREATE TABLE [Stage].[pyaterochka].[pyaterochka_<месяц>_<год>] (
-    [retail_chain] NVARCHAR(50),
-    [brand] NVARCHAR(255),
-    [product_name] NVARCHAR(255),
-    [sales_quantity] INT,
-    [sales_amount_rub] DECIMAL(18,2),
-    [sales_weight_kg] DECIMAL(18,3),
-    [cost_price_rub] DECIMAL(18,2),
-    [sales_month] INT,
-    [product_category] NVARCHAR(255),
-    [product_type] NVARCHAR(255),
-    [supplier_name] NVARCHAR(255),
-    [product_unified_name] NVARCHAR(255),
-    [product_weight_g] INT,
-    [product_flavor] NVARCHAR(100),
-    [load_dt] DATETIME
-```
+2. **Проверка согласованности**:
+   - sales_amount_rub ≈ avg_sell_price * sales_quantity
+   - margin_amount_rub ≈ sales_amount_rub - (avg_cost_price * sales_quantity)
 
-### 🛒 X5 Retail Group
-```sql
-CREATE TABLE [Stage].[x5].[x5_<месяц>_<год>] (
-    [retail_chain] NVARCHAR(50),
-    [branch] NVARCHAR(255),
-    [region] NVARCHAR(100),
-    [city] NVARCHAR(100),
-    [address] NVARCHAR(500),
-    [factory] NVARCHAR(255),
-    [factory_2] NVARCHAR(255),
-    [prod_level_2] NVARCHAR(255),
-    [prod_level_3] NVARCHAR(255),
-    [prod_level_4] NVARCHAR(255),
-    [material] NVARCHAR(255),
-    [material_2] NVARCHAR(255),
-    [brand] NVARCHAR(255),
-    [vendor] NVARCHAR(255),
-    [main_supplier] NVARCHAR(255),
-    [warehouse_supplier] NVARCHAR(255),
-    [quantity] INT,
-    [gross_turnover] DECIMAL(18,2),
-    [gross_cost] DECIMAL(18,2),
-    [avg_cost_price] DECIMAL(18,2),
-    [avg_sell_price] DECIMAL(18,2),
-    [sale_month] INT,
-    [sale_year] INT
-```
+3. **Проверка точности**:
+   - Весовые показатели должны соответствовать заявленному весу продукта
+   - Даты должны находиться в разумных временных рамках
+
+### 5. Рекомендации по использованию
+
+1. Для анализа использовать только представления [clear].[*]
+2. При соединении таблиц использовать product_article или barcode в качестве ключа
+3. Для временных анализов использовать комбинацию sale_year + sale_month
+4. Для географического анализа использовать иерархию: branch → region → city → address
+
+
 
 ## 🔄 Рабочий процесс
 ```mermaid

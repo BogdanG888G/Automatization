@@ -24,7 +24,7 @@ DEFAULT_CONN_STAGE = (
 )
 
 class MagnitConfig:
-    MAX_CONCURRENT_TASKS = 2
+    MAX_CONCURRENT_TASKS = 1
     MAX_FILES_PER_RUN = 8
     TASK_TIMEOUT = timedelta(minutes=1200)
     MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 3GB
