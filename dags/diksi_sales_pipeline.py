@@ -60,8 +60,9 @@ DEFAULT_CONN_STAGE = (
 class DiksiConfig:
     MAX_CONCURRENT_TASKS = 4
     MAX_FILES_PER_RUN = 8
-    TASK_TIMEOUT = timedelta(minutes=360)
+    TASK_TIMEOUT = timedelta(minutes=60)
     MAX_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3GB
+    max_active_tis_per_dag=2  # Ограничьте параллельные выполнения
 
     DATA_DIR = "/opt/airflow/data"
     ARCHIVE_DIR = "/opt/airflow/archive"

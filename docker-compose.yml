@@ -7,28 +7,55 @@ services:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
+      POSTGRES_PORT: 5432
     volumes:
       - postgres_db:/var/lib/postgresql/data
-    healthcheck:  # Добавляем healthcheck
-      test: ["CMD-SHELL", "pg_isready -U airflow"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
       interval: 5s
       timeout: 5s
       retries: 10
-    restart: always
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G  # Выделяем память для Postgres
 
   airflow:
     build: .
     depends_on:
       postgres:
-        condition: service_healthy  # Используем проверку здоровья
+        condition: service_healthy
     environment:
+      # Core settings
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
-      AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "True"
-      AIRFLOW__CORE__LOG_FETCH_TIMEOUT_SEC: "0"
-      AIRFLOW__CORE__DAG_FILE_PROCESSOR_TIMEOUT: "50"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      
+      # Performance tuning
+      AIRFLOW__CORE__PARALLELISM: "4"  # Уменьшено для 4 CPU
+      AIRFLOW__CORE__DAG_CONCURRENCY: "2"  # Макс параллельных DAG runs
+      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "2"  # Важно для ваших тяжелых задач
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: "10"  # Частые проверки heartbeat
+      
+      # Timeouts
+      AIRFLOW__CORE__DAG_FILE_PROCESSOR_TIMEOUT: "120"
+      AIRFLOW__CELERY__OPERATION_TIMEOUT: "60"
+      
+      # Logging
       AIRFLOW__LOGGING__LOGGING_LEVEL: "INFO"
+      AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
+      
+      # Webserver
+      AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "True"
+      AIRFLOW__WEBSERVER__WORKER_REFRESH_INTERVAL: "300"
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 16G
+        reservations:
+          memory: 12G  # Гарантированный минимум памяти
     volumes:
       - ./dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts
@@ -38,7 +65,12 @@ services:
       - ./requirements.txt:/requirements.txt:ro
     ports:
       - "8080:8080"
-    restart: always
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /opt/airflow/airflow-webserver.pid ]"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
 volumes:
   postgres_db:

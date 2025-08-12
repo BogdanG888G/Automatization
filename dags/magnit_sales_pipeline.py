@@ -337,7 +337,7 @@ with DAG(
     dag_id="magnit_sales_pipeline_optimized",
     default_args=default_args,
     start_date=datetime(2025, 7, 1),
-    schedule_interval="0 15 * * *",  # каждый день в 15:00,
+    schedule_interval="35 17 * * *",  # 19:35 UTC = 22:35 MSK (UTC+3)
     catchup=False,
     max_active_tasks=MagnitConfig.MAX_CONCURRENT_TASKS,
     concurrency=MagnitConfig.MAX_CONCURRENT_TASKS,

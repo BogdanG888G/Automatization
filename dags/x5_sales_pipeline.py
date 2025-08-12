@@ -31,9 +31,9 @@ DEFAULT_CONN_STAGE = (
 # Config                              #
 # ----------------------------------- #
 class X5Config:
-    MAX_CONCURRENT_TASKS = 2
+    MAX_CONCURRENT_TASKS = 1
     MAX_FILES_PER_RUN = 4
-    TASK_TIMEOUT = timedelta(minutes=1200)
+    TASK_TIMEOUT = timedelta(minutes=250)
     MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 3GB
     POOL_SLOTS = 1  # Сбалансировать с pool_size БД
 
@@ -384,8 +384,8 @@ def archive_x5_file(file_path: str):
 # ----------------------------------- #
 with DAG(
     dag_id="x5_sales_data_pipeline",
-    start_date=datetime(2025, 7, 15),
-    schedule_interval="0 8 * * *",
+    start_date=datetime(2025, 8, 1),
+    schedule_interval="10 1 * * *",  # 01:00 UTC = 04:00 MSK (UTC+3)
     catchup=False,
     max_active_runs=1,
     tags=["x5", "sales", "data"],

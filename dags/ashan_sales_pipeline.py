@@ -295,7 +295,7 @@ with DAG(
     dag_id="ashan_sales_pipeline_optimized",
     default_args=default_args,
     start_date=datetime(2025, 7, 1),
-    schedule_interval="0 1 * * *",  # каждый день в 15:00,
+    schedule_interval="0 2 * * *",  # каждый день в 15:00,
     catchup=False,
     max_active_tasks=Config.MAX_CONCURRENT_TASKS,
     concurrency=Config.MAX_CONCURRENT_TASKS,
