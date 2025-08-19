@@ -50,7 +50,7 @@ def train_flavor_model():
 
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 3),
-        max_features=10000,
+        max_features=8000,
         stop_words=None,
         min_df=3,  # слова должны встречаться минимум в 3 документах
         max_df=0.9 # слова встречающиеся более чем в 90% документов исключаем
@@ -60,7 +60,7 @@ def train_flavor_model():
 
     # Обучение LightGBM
     model = LGBMClassifier(
-        n_estimators=1000,
+        n_estimators=1200,
         learning_rate=0.1,
         random_state=42,
         verbose=-1,

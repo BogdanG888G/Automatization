@@ -33,7 +33,7 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       
       # Performance tuning
-      AIRFLOW__CORE__PARALLELISM: "4"  # Уменьшено для 4 CPU
+      AIRFLOW__CORE__PARALLELISM: "2"  # Уменьшено для 4 CPU
       AIRFLOW__CORE__DAG_CONCURRENCY: "2"  # Макс параллельных DAG runs
       AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "2"  # Важно для ваших тяжелых задач
       AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: "10"  # Частые проверки heartbeat

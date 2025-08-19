@@ -191,55 +191,6 @@ with DAG(
 |  | sales_tons | NUMERIC(18,3) | Продажи в тоннах | Опционально | 0.074 |
 |  | sales_weight_kg | NUMERIC(18,3) | Продажи в кг | Опционально | 74.000 |
 
-### 3. Правила преобразования данных
-
-#### 3.1. Общие правила
-- Все строковые значения должны обрабатываться через TRY_CAST
-- Все числовые значения должны иметь явное указание точности
-- NULL значения должны быть явно указаны для опциональных полей
-
-### 3.2. Специфичные преобразования
-
-**Для расчета средних цен:**
-```sql
-TRY_CAST(
-    CASE 
-        WHEN TRY_CAST(revenue_qty AS NUMERIC(18,4)) > 0 
-        THEN TRY_CAST(revenue_rub AS NUMERIC(18,4)) / TRY_CAST(revenue_qty AS NUMERIC(18,4))
-        ELSE NULL 
-    END 
-AS NUMERIC(18,4)) AS avg_sell_price
-```
-
-**Для расчета маржи:**
-```sql
-TRY_CAST(
-    TRY_CAST(revenue_rub AS NUMERIC(18,4)) - 
-    (TRY_CAST(purchase_price AS NUMERIC(18,4)) * TRY_CAST(revenue_qty AS NUMERIC(18,4)))
-AS NUMERIC(18,2)) AS margin_amount_rub
-```
-
-**Для весовых показателей:**
-```sql
--- В тоннах
-TRY_CAST(
-    CASE 
-        WHEN ISNUMERIC(weight_extracted) = 1 
-        THEN (TRY_CAST(revenue_qty AS NUMERIC(18,3)) * TRY_CAST(weight_extracted AS NUMERIC(18,3))) / 1000 
-        ELSE NULL 
-    END 
-AS NUMERIC(18,3)) AS sales_tons
-
--- В килограммах
-TRY_CAST(
-    CASE 
-        WHEN ISNUMERIC(weight_extracted) = 1 
-        THEN TRY_CAST(revenue_qty AS NUMERIC(18,3)) * TRY_CAST(weight_extracted AS NUMERIC(18,3))
-        ELSE NULL 
-    END 
-AS NUMERIC(18,3)) AS sales_weight_kg
-```
-
 ### 4. Контроль качества данных
 
 1. **Проверка полноты**:
