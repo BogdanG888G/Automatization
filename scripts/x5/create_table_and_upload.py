@@ -376,7 +376,7 @@ class X5TableProcessor:
             # Добавляем извлечённый из текста вес
             df['weight_extracted'] = product_names.apply(extract_weight)
             df['package_type'] = product_names.apply(extract_packaging_type)
-
+            '''
         # Обогащение по адресу — ищем колонку, где в названии есть "add" (например, "address", "Адрес")
         address_col_candidates = [c for c in df.columns if 'add' in c.lower()]
         if address_col_candidates:
@@ -405,6 +405,11 @@ class X5TableProcessor:
             except Exception as e:
                 logger.warning(f"Ошибка предсказания филиала: {e}")
                 df['branch_predicted'] = [""] * len(city_inputs)
+            '''
+        address_col_candidates = [c for c in df.columns if 'add' in c.lower()]
+        if address_col_candidates:
+            address_col = address_col_candidates[0]
+            addresses = df[address_col].fillna("")
 
         return df
 
