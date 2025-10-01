@@ -9,3 +9,4 @@ natasha
 razdel==0.5.0
 pymorphy2==0.9.1
 lightgbm
+pyarrow
