@@ -519,13 +519,13 @@ def process_file_complete(file_path):
         engine.dispose()
 
 with DAG(
-    dag_id="aushan_sales_pipeline_complete",
+    dag_id="okey_sales_pipeline_complete",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
     schedule_interval="@daily",
     catchup=False,
     max_active_tasks=1,
-    tags=["aushan", "complete", "all_models"],
+    tags=["okey", "complete", "all_models"],
 ) as dag:
 
     start = EmptyOperator(task_id="start")

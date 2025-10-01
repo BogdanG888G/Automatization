@@ -525,7 +525,7 @@ with DAG(
     schedule_interval="@daily",
     catchup=False,
     max_active_tasks=1,
-    tags=["aushan", "complete", "all_models"],
+    tags=["x5", "complete", "all_models"],
 ) as dag:
 
     start = EmptyOperator(task_id="start")
