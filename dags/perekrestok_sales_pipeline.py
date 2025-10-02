@@ -214,7 +214,7 @@ def standardize_column_names_complete(df):
         
         if 'наименование' in clean_col and any(keyword in clean_col for keyword in ['поставщика', 'поставщик']):
             column_mapping[col] = 'supplier_name'
-        elif 'наименование' in clean_col:
+        elif 'наименование' in clean_col or 'товар' in clean_col:
             column_mapping[col] = 'product_name'
         elif 'адрес' in clean_col:
             column_mapping[col] = 'address'
@@ -455,11 +455,11 @@ def process_csv_with_all_models(file_path, engine, table_name):
 
 @task
 def scan_files():
-    """Сканирует CSV файлы с префиксом aushan_ в директории"""
+    """Сканирует CSV файлы с префиксом perekrestok_ в директории"""
     csv_files = []
     try:
         for file in os.listdir(DATA_DIR):
-            if file.startswith('aushan_') and file.endswith('.csv'):
+            if file.startswith('perekrestok_') and file.endswith('.csv'):
                 file_path = os.path.join(DATA_DIR, file)
                 if os.path.isfile(file_path):
                     csv_files.append(file_path)

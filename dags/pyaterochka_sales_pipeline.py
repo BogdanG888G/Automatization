@@ -455,11 +455,11 @@ def process_csv_with_all_models(file_path, engine, table_name):
 
 @task
 def scan_files():
-    """Сканирует CSV файлы с префиксом aushan_ в директории"""
+    """Сканирует CSV файлы с префиксом pyaterochka_ в директории"""
     csv_files = []
     try:
         for file in os.listdir(DATA_DIR):
-            if file.startswith('aushan_') and file.endswith('.csv'):
+            if file.startswith('pyaterochka_') and file.endswith('.csv'):
                 file_path = os.path.join(DATA_DIR, file)
                 if os.path.isfile(file_path):
                     csv_files.append(file_path)
