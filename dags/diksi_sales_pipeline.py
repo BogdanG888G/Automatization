@@ -214,9 +214,9 @@ def standardize_column_names_complete(df):
         
         if 'наименование' in clean_col and any(keyword in clean_col for keyword in ['поставщика', 'поставщик']):
             column_mapping[col] = 'supplier_name'
-        elif 'наименование' in clean_col:
+        elif 'наименование' in clean_col or 'товар' in clean_col and 'код' not in clean_col:
             column_mapping[col] = 'product_name'
-        elif 'адрес' in clean_col:
+        elif 'адрес' in clean_col or 'addr' in clean_col:
             column_mapping[col] = 'address'
         elif 'город' in clean_col:
             column_mapping[col] = 'city'
