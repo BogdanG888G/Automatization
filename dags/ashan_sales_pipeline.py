@@ -16,6 +16,7 @@ import csv
 import numpy as np
 from sklearn.utils import gen_batches
 import warnings
+import shutil
 warnings.filterwarnings('ignore', category=UserWarning)
 
 # Конфигурация
@@ -24,12 +25,18 @@ CONN_STRING = (
     "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
 )
 DATA_DIR = "/opt/airflow/data"
-CHUNK_SIZE = 50_000  # Уменьшили для стабильности
+ARCHIVE_DIR = "/opt/airflow/archive"
+CHUNK_SIZE = 50_000
 ML_MODELS_DIR = "/opt/airflow/ml_models"
 TEMP_PARQUET_DIR = "/opt/airflow/temp_parquet"
 
-# Создаем временную директорию для parquet файлов
+# Создаем временные директории
 os.makedirs(TEMP_PARQUET_DIR, exist_ok=True)
+os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+# ГЛОБАЛЬНЫЙ КЭШ МОДЕЛЕЙ
+ML_MODELS_CACHE = None
+MODELS_LAST_LOADED = None
 
 default_args = {
     'owner': 'airflow',
@@ -41,11 +48,22 @@ def get_engine():
     """Создает engine для подключения к БД"""
     return create_engine(CONN_STRING)
 
-def load_all_models():
-    """Загружает ВСЕ 7 моделей"""
+def load_all_models_cached():
+    """Загружает ВСЕ 7 моделей С КЭШИРОВАНИЕМ"""
+    global ML_MODELS_CACHE, MODELS_LAST_LOADED
+    
+    # Проверяем, нужно ли перезагружать модели (раз в 1 час)
+    if (ML_MODELS_CACHE is not None and 
+        MODELS_LAST_LOADED is not None and 
+        (datetime.now() - MODELS_LAST_LOADED).total_seconds() < 3600):
+        logging.info("Используем кэшированные модели")
+        return ML_MODELS_CACHE
+    
     ml_models = {}
     
     try:
+        logging.info("Начинаем загрузку моделей...")
+        
         # Загружаем модели для продуктов
         product_models_dir = os.path.join(ML_MODELS_DIR, "product_enrichment")
         if os.path.exists(product_models_dir):
@@ -90,12 +108,46 @@ def load_all_models():
                 except Exception as e:
                     logging.error(f"Ошибка загрузки модели {model_name}: {e}")
         
+        # Сохраняем в кэш
+        ML_MODELS_CACHE = ml_models
+        MODELS_LAST_LOADED = datetime.now()
+        
         logging.info(f"Всего загружено моделей: {len(ml_models)}")
         
     except Exception as e:
         logging.error(f"Ошибка загрузки моделей: {e}")
     
     return ml_models
+
+def archive_file(file_path):
+    """Просто перемещает файл в папку archive"""
+    try:
+        if not os.path.exists(file_path):
+            logging.warning(f"Файл для архивации не найден: {file_path}")
+            return False
+        
+        filename = os.path.basename(file_path)
+        
+        # Просто перемещаем файл в корень archive
+        archive_path = os.path.join(ARCHIVE_DIR, filename)
+        
+        # Если файл с таким именем уже существует, добавляем timestamp
+        if os.path.exists(archive_path):
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            name_part = os.path.splitext(filename)[0]
+            extension = os.path.splitext(filename)[1]
+            new_filename = f"{name_part}_{timestamp}{extension}"
+            archive_path = os.path.join(ARCHIVE_DIR, new_filename)
+        
+        # Перемещаем файл
+        shutil.move(file_path, archive_path)
+        logging.info(f"Файл перемещен в архив: {archive_path}")
+        
+        return True
+        
+    except Exception as e:
+        logging.error(f"Ошибка архивации файла {file_path}: {e}")
+        return False
 
 # Компилируем regex заранее для производительности
 WEIGHT_PATTERN = re.compile(r'(\d+(?:[.,]\d+)?)[ ]?(г|гр|грамм|кг|кгм)', re.IGNORECASE)
@@ -238,7 +290,7 @@ def safe_to_sql_fixed(df, table_name, engine, schema='ashan', if_exists='append'
             df[col] = df[col].astype(str).str.slice(0, 250)  # Ограничиваем длину
         
         # Разбиваем на очень маленькие части для избежания ошибки параметров
-        batch_size = 1000  # Уменьшили размер батча
+        batch_size = 1000
         total_batches = (len(df) + batch_size - 1) // batch_size
         
         for i in range(0, len(df), batch_size):
@@ -249,7 +301,7 @@ def safe_to_sql_fixed(df, table_name, engine, schema='ashan', if_exists='append'
                 schema=schema,
                 if_exists=if_exists if i == 0 else 'append',
                 index=False,
-                method=None  # Убираем method='multi' чтобы избежать ошибки параметров
+                method=None
             )
             logging.info(f"Успешно вставлен батч {i//batch_size + 1}/{total_batches}")
         
@@ -378,7 +430,6 @@ def enrich_data_complete(df, ml_models):
         # Логируем результат
         added_columns = [col for col in df.columns if 'predicted' in col or 'extracted' in col]
         logging.info(f"Обогащение завершено. Добавлено колонок: {len(added_columns)}")
-        logging.info(f"Добавленные колонки: {added_columns}")
         
         return df
 
@@ -391,8 +442,8 @@ def process_csv_with_all_models(file_path, engine, table_name):
     try:
         logging.info(f"Начинаем обработку со ВСЕМИ моделями: {file_path}")
         
-        # Загружаем ВСЕ модели
-        ml_models = load_all_models()
+        # Загружаем ВСЕ модели С КЭШИРОВАНИЕМ
+        ml_models = load_all_models_cached()
         
         chunk_count = 0
         total_rows = 0
@@ -457,13 +508,38 @@ def scan_files():
     """Сканирует CSV файлы с префиксом aushan_ в директории"""
     csv_files = []
     try:
-        for file in os.listdir(DATA_DIR):
-            if file.startswith('aushan_') and file.endswith('.csv'):
-                file_path = os.path.join(DATA_DIR, file)
-                if os.path.isfile(file_path):
-                    csv_files.append(file_path)
+        logging.info(f"=== НАЧИНАЕМ СКАНИРОВАНИЕ ПАПКИ {DATA_DIR} ===")
         
-        logging.info(f"Найдено {len(csv_files)} CSV файлов: {[os.path.basename(f) for f in csv_files]}")
+        # Проверяем существование папки
+        if not os.path.exists(DATA_DIR):
+            logging.error(f"Папка {DATA_DIR} не существует!")
+            return []
+        
+        # Логируем все файлы в папке
+        all_files = os.listdir(DATA_DIR)
+        logging.info(f"Все файлы в папке {DATA_DIR}: {all_files}")
+        
+        for file in all_files:
+            file_path = os.path.join(DATA_DIR, file)
+            logging.info(f"Проверяем файл: {file} (путь: {file_path})")
+            
+            # Проверяем условия
+            is_csv = file.endswith('.csv')
+            starts_with_aushan = file.startswith('aushan_')
+            is_file = os.path.isfile(file_path)
+            
+            logging.info(f"  CSV: {is_csv}, aushan_: {starts_with_aushan}, файл: {is_file}")
+            
+            if starts_with_aushan and is_csv and is_file:
+                csv_files.append(file_path)
+                logging.info(f"  ✅ ДОБАВЛЕН: {file}")
+            else:
+                logging.info(f"  ❌ ПРОПУЩЕН: {file}")
+        
+        logging.info(f"=== РЕЗУЛЬТАТ СКАНИРОВАНИЯ ===")
+        logging.info(f"Найдено подходящих CSV файлов: {len(csv_files)}")
+        logging.info(f"Список файлов: {[os.path.basename(f) for f in csv_files]}")
+        
         return csv_files
         
     except Exception as e:
@@ -473,8 +549,13 @@ def scan_files():
 @task
 def process_file_complete(file_path):
     """Обработка файла со ВСЕМИ моделями"""
+    logging.info(f"=== ПОЛУЧЕН ФАЙЛ ДЛЯ ОБРАБОТКИ: {file_path} ===")
+    
     if not os.path.exists(file_path):
         logging.error(f"Файл не найден: {file_path}")
+        # Проверим что есть в папке
+        data_files = os.listdir(DATA_DIR)
+        logging.info(f"Файлы в папке data: {data_files}")
         return
         
     engine = get_engine()
@@ -483,6 +564,7 @@ def process_file_complete(file_path):
     
     try:
         logging.info(f"=== НАЧАЛО ПОЛНОЙ ОБРАБОТКИ {file_path} ===")
+        logging.info(f"Размер файла: {os.path.getsize(file_path)} байт")
         
         # Используем обработку со всеми моделями
         chunk_count, total_rows = process_csv_with_all_models(file_path, engine, table_name)
@@ -499,32 +581,37 @@ def process_file_complete(file_path):
                     count_in_db = result.scalar()
                     logging.info(f"ПРОВЕРКА: В таблице ashan.{table_name} сейчас {count_in_db} строк")
                     
-                    # Проверяем несколько записей
-                    sample_result = conn.execute(text(f"SELECT TOP 3 product_name, brand_predicted, city_predicted FROM ashan.{table_name}"))
-                    sample_rows = sample_result.fetchall()
-                    logging.info("ПРИМЕРЫ ДАННЫХ:")
-                    for row in sample_rows:
-                        logging.info(f"  Продукт: {row[0]}, Бренд: {row[1]}, Город: {row[2]}")
-                        
             except Exception as e:
                 logging.warning(f"Не удалось проверить данные в БД: {e}")
+            
+            # АРХИВАЦИЯ
+            if archive_file(file_path):
+                logging.info(f"Файл успешно перемещен в архив: {file_path}")
+            else:
+                logging.warning(f"Не удалось переместить файл в архив: {file_path}")
+                
         else:
             logging.error(f"=== ПРОВАЛ: Файл {file_path} не обработан ===")
+            # Все равно архивируем файл
+            if archive_file(file_path):
+                logging.info(f"Файл перемещен в архив (не обработан): {file_path}")
         
     except Exception as e:
         logging.error(f"КРИТИЧЕСКАЯ ОШИБКА обработки {file_path}: {str(e)}")
+        # Все равно архивируем файл при ошибке
+        archive_file(file_path)
         raise
     finally:
         engine.dispose()
 
 with DAG(
-    dag_id="aushan_sales_pipeline_complete",
+    dag_id="aushan_sales_pipeline",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
     schedule_interval="@daily",
     catchup=False,
     max_active_tasks=1,
-    tags=["aushan", "complete", "all_models"],
+    tags=["aushan"],
 ) as dag:
 
     start = EmptyOperator(task_id="start")
