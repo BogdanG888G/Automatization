@@ -160,9 +160,15 @@ def archive_file(file_path):
         
         # Перемещаем файл
         shutil.move(file_path, archive_path)
-        logging.info(f"Файл перемещен в архив: {archive_path}")
+        logging.info(f"Файл перемещен в архив: {file_path} -> {archive_path}")
         
-        return True
+        # Проверяем, что файл действительно переместился
+        if os.path.exists(archive_path) and not os.path.exists(file_path):
+            logging.info(f"✅ Подтверждено: файл успешно архивирован")
+            return True
+        else:
+            logging.error(f"❌ Ошибка архивации: файл не переместился корректно")
+            return False
         
     except Exception as e:
         logging.error(f"Ошибка архивации файла {file_path}: {e}")
@@ -585,6 +591,8 @@ def process_file_complete(file_path):
     original_filename = os.path.basename(file_path).replace('.csv', '')
     table_name = re.sub(r'[^a-zA-Z0-9_]', '_', original_filename.lower())
     
+    file_processed_successfully = False
+    
     try:
         logging.info(f"=== НАЧАЛО ОБРАБОТКИ {file_path} ===")
         
@@ -606,20 +614,30 @@ def process_file_complete(file_path):
             except Exception as e:
                 logging.warning(f"Не удалось проверить данные в БД: {e}")
             
-            # АРХИВАЦИЯ
+            # АРХИВАЦИЯ только при успешной обработке
             if archive_file(file_path):
                 logging.info(f"Файл перемещен в архив: {file_path}")
+                file_processed_successfully = True
                 
         else:
             logging.error(f"=== ПРОВАЛ: Файл {file_path} не обработан ===")
-            archive_file(file_path)
+            # Архивируем даже если не обработали, но с пометкой ошибки
+            if archive_file(file_path):
+                logging.info(f"Файл перемещен в архив после ошибки обработки: {file_path}")
+                file_processed_successfully = True
         
     except Exception as e:
         logging.error(f"Ошибка обработки {file_path}: {str(e)}")
-        archive_file(file_path)
+        # Пытаемся архивировать файл даже при ошибке
+        if archive_file(file_path):
+            logging.info(f"Файл перемещен в архив после исключения: {file_path}")
+            file_processed_successfully = True
         raise
+        
     finally:
         engine.dispose()
+        # Убираем дублирующий вызов archive_file из finally
+        # Файл уже архивирован в основном блоке или блоке исключения
 
 with DAG(
     dag_id="x5_sales_pipeline",

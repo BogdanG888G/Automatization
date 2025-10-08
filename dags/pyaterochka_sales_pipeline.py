@@ -139,7 +139,7 @@ def load_all_models_cached():
     return ml_models
 
 def archive_file(file_path):
-    """Просто перемещает файл в папку archive"""
+    """Перемещает файл в папку archive с проверкой"""
     try:
         if not os.path.exists(file_path):
             logging.warning(f"Файл для архивации не найден: {file_path}")
@@ -160,9 +160,15 @@ def archive_file(file_path):
         
         # Перемещаем файл
         shutil.move(file_path, archive_path)
-        logging.info(f"Файл перемещен в архив: {archive_path}")
+        logging.info(f"Файл перемещен в архив: {file_path} -> {archive_path}")
         
-        return True
+        # Проверяем, что файл действительно переместился
+        if os.path.exists(archive_path) and not os.path.exists(file_path):
+            logging.info(f"✅ Подтверждено: файл успешно архивирован")
+            return True
+        else:
+            logging.error(f"❌ Ошибка архивации: файл не переместился корректно")
+            return False
         
     except Exception as e:
         logging.error(f"Ошибка архивации файла {file_path}: {e}")
@@ -605,21 +611,22 @@ def process_file_complete(file_path):
                     
             except Exception as e:
                 logging.warning(f"Не удалось проверить данные в БД: {e}")
-            
-            # АРХИВАЦИЯ
-            if archive_file(file_path):
-                logging.info(f"Файл перемещен в архив: {file_path}")
-                
-        else:
-            logging.error(f"=== ПРОВАЛ: Файл {file_path} не обработан ===")
-            archive_file(file_path)
         
     except Exception as e:
         logging.error(f"Ошибка обработки {file_path}: {str(e)}")
-        archive_file(file_path)
         raise
+        
     finally:
         engine.dispose()
+        
+        # АРХИВАЦИЯ ВСЕГДА в finally, но проверяем существует ли файл
+        if os.path.exists(file_path):
+            if archive_file(file_path):
+                logging.info(f"Файл успешно архивирован: {file_path}")
+            else:
+                logging.error(f"Не удалось архивировать файл: {file_path}")
+        else:
+            logging.info(f"Файл уже архивирован или не существует: {file_path}")
 
 with DAG(
     dag_id="pyaterochka_sales_pipeline",
