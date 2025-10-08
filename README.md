@@ -16,42 +16,11 @@
 - Поддержка мультисетевой структуры данных
 - Управление через Docker-контейнеры
 
-## 📦 Требования
-- Docker Desktop 20.10+
-- Docker Compose 2.0+
-- Microsoft SQL Server 2019+
-- 4 ГБ свободной оперативной памяти
+**Доступ к Airflow UI:**
 
-## 🚀 Быстрый старт
-1. **Клонируйте репозиторий:**
-```bash
-git clone https://github.com/BogdanG888G/Automatization.git
-cd airflow-data-pipeline
-```
-
-2. **Настройте окружение:**
-```bash
-cp .env.example .env
-# Отредактируйте .env файл под вашу конфигурацию
-```
-
-3. **Запустите проект:**
-```bash
-docker-compose up -d --build
-```
-
-4. **Доступ к Airflow UI:**
-```
-http://localhost:8080
-```
 Логин: `airflow`  
 Пароль: `airflow`
 
-5. **Поместите файлы для обработки:**
-```bash
-# Пример для Magnit
-cp ваш_файл.csv ./data/magnit_december_2024.csv
-```
 
 ## 🗂 Структура проекта
 ```
@@ -101,32 +70,6 @@ AUTOMATIZATION/
 ├── TODO.md
 ├── entrypoint.sh
 └── README.md
-```
-
-## ⚙️ Настройка подключения к MSSQL
-1. В Airflow UI: **Admin → Variables**
-2. Создайте переменную:
-   - **Key**: `MSSQL_CONN_STR`
-   - **Value**:
-```
-mssql+pyodbc://<user>:<password>@<host>/<database>?driver=ODBC+Driver+17+for+SQL+Server
-```
-
-Пример для Windows:
-```
-mssql+pyodbc://airflow_agent:Pass123@host.docker.internal/SalesDB?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes
-```
-
-## 🔧 Конфигурация DAG
-Основной DAG настроен с параметрами:
-```python
-with DAG(
-    dag_id="retail_data_pipeline",
-    start_date=datetime(2025, 1, 1),
-    schedule_interval="@daily",  # Ежедневный запуск
-    catchup=False,
-    tags=["retail", "data_processing"],
-) as dag:
 ```
 
 ## Документация по стандартизации данных розничных продаж
@@ -227,20 +170,6 @@ graph TD
     G --> H[Загрузить данные в Stage БД]
     H --> I[Переместить файл в архив]
     I --> J[Записать успешное выполнение в лог]
-```
-
-## 🐛 Устранение неполадок
-**Проверка логов:**
-```bash
-docker-compose logs -f airflow-worker
-```
-
-
-**Пересборка проекта:**
-```bash
-docker-compose down --volumes --remove-orphans
-docker-compose build --no-cache
-docker-compose up -d
 ```
 
 **Очистка Docker:**
