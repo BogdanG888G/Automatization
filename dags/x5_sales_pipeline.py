@@ -16,6 +16,7 @@ import csv
 import numpy as np
 from sklearn.utils import gen_batches
 import warnings
+import shutil
 warnings.filterwarnings('ignore', category=UserWarning)
 
 # Конфигурация
@@ -23,14 +24,19 @@ CONN_STRING = (
     "mssql+pyodbc://airflow_agent:123@host.docker.internal/Stage"
     "?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
 )
-
 DATA_DIR = "/opt/airflow/data"
-CHUNK_SIZE = 50_000  # Уменьшили для стабильности
+ARCHIVE_DIR = "/opt/airflow/archive"
+CHUNK_SIZE = 50_000
 ML_MODELS_DIR = "/opt/airflow/ml_models"
 TEMP_PARQUET_DIR = "/opt/airflow/temp_parquet"
 
-# Создаем временную директорию для parquet файлов
+# Создаем временные директории
 os.makedirs(TEMP_PARQUET_DIR, exist_ok=True)
+os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+# ФАЙЛОВЫЙ КЭШ ДЛЯ МОДЕЛЕЙ (работает в Airflow)
+MODELS_CACHE_DIR = "/opt/airflow/models_cache"
+os.makedirs(MODELS_CACHE_DIR, exist_ok=True)
 
 default_args = {
     'owner': 'airflow',
@@ -42,11 +48,32 @@ def get_engine():
     """Создает engine для подключения к БД"""
     return create_engine(CONN_STRING)
 
-def load_all_models():
-    """Загружает ВСЕ 7 моделей"""
+def load_all_models_cached():
+    """Загружает ВСЕ 7 моделей с ФАЙЛОВЫМ кэшированием"""
+    cache_file = os.path.join(MODELS_CACHE_DIR, "models_cache.pkl")
+    cache_meta_file = os.path.join(MODELS_CACHE_DIR, "models_cache_meta.pkl")
+    
+    # Проверяем актуальность кэша (1 час)
+    if os.path.exists(cache_file) and os.path.exists(cache_meta_file):
+        try:
+            with open(cache_meta_file, 'rb') as f:
+                cache_meta = pickle.load(f)
+            
+            cache_time = cache_meta.get('timestamp')
+            if cache_time and (datetime.now() - cache_time).total_seconds() < 3600:
+                logging.info("Используем кэшированные модели из файла")
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
+        except Exception as e:
+            logging.warning(f"Ошибка чтения кэша: {e}. Перезагружаем модели.")
+    
+    # Загружаем модели заново
     ml_models = {}
     
     try:
+        logging.info("Начинаем загрузку моделей...")
+        start_time = datetime.now()
+        
         # Загружаем модели для продуктов
         product_models_dir = os.path.join(ML_MODELS_DIR, "product_enrichment")
         if os.path.exists(product_models_dir):
@@ -57,13 +84,14 @@ def load_all_models():
                     vectorizer_path = os.path.join(product_models_dir, f"{model_name}_vectorizer.pkl")
                     
                     if os.path.exists(model_path) and os.path.exists(vectorizer_path):
+                        logging.info(f"Загружаем модель: {model_name}")
                         with open(model_path, 'rb') as f:
                             model = pickle.load(f)
                         with open(vectorizer_path, 'rb') as f:
                             vectorizer = pickle.load(f)
                         
                         ml_models[f"product_{model_name}"] = (model, vectorizer)
-                        logging.info(f"Загружена продуктовая модель: {model_name}")
+                        logging.info(f"✅ Загружена продуктовая модель: {model_name}")
                     else:
                         logging.warning(f"Файлы модели {model_name} не найдены")
                 except Exception as e:
@@ -79,24 +107,66 @@ def load_all_models():
                     vectorizer_path = os.path.join(address_models_dir, f"{model_name}_vectorizer.pkl")
                     
                     if os.path.exists(model_path) and os.path.exists(vectorizer_path):
+                        logging.info(f"Загружаем модель: {model_name}")
                         with open(model_path, 'rb') as f:
                             model = pickle.load(f)
                         with open(vectorizer_path, 'rb') as f:
                             vectorizer = pickle.load(f)
                         
                         ml_models[f"address_{model_name}"] = (model, vectorizer)
-                        logging.info(f"Загружена адресная модель: {model_name}")
+                        logging.info(f"✅ Загружена адресная модель: {model_name}")
                     else:
                         logging.warning(f"Файлы модели {model_name} не найдены")
                 except Exception as e:
                     logging.error(f"Ошибка загрузки модели {model_name}: {e}")
         
-        logging.info(f"Всего загружено моделей: {len(ml_models)}")
+        # Сохраняем в файловый кэш
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(ml_models, f)
+            with open(cache_meta_file, 'wb') as f:
+                pickle.dump({'timestamp': datetime.now()}, f)
+            logging.info("Модели сохранены в файловый кэш")
+        except Exception as e:
+            logging.warning(f"Не удалось сохранить кэш: {e}")
+        
+        load_time = (datetime.now() - start_time).total_seconds()
+        logging.info(f"Всего загружено моделей: {len(ml_models)} за {load_time:.2f} секунд")
         
     except Exception as e:
         logging.error(f"Ошибка загрузки моделей: {e}")
     
     return ml_models
+
+def archive_file(file_path):
+    """Просто перемещает файл в папку archive"""
+    try:
+        if not os.path.exists(file_path):
+            logging.warning(f"Файл для архивации не найден: {file_path}")
+            return False
+        
+        filename = os.path.basename(file_path)
+        
+        # Просто перемещаем файл в корень archive
+        archive_path = os.path.join(ARCHIVE_DIR, filename)
+        
+        # Если файл с таким именем уже существует, добавляем timestamp
+        if os.path.exists(archive_path):
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            name_part = os.path.splitext(filename)[0]
+            extension = os.path.splitext(filename)[1]
+            new_filename = f"{name_part}_{timestamp}{extension}"
+            archive_path = os.path.join(ARCHIVE_DIR, new_filename)
+        
+        # Перемещаем файл
+        shutil.move(file_path, archive_path)
+        logging.info(f"Файл перемещен в архив: {archive_path}")
+        
+        return True
+        
+    except Exception as e:
+        logging.error(f"Ошибка архивации файла {file_path}: {e}")
+        return False
 
 # Компилируем regex заранее для производительности
 WEIGHT_PATTERN = re.compile(r'(\d+(?:[.,]\d+)?)[ ]?(г|гр|грамм|кг|кгм)', re.IGNORECASE)
@@ -203,8 +273,9 @@ def create_table_if_not_exists(engine, table_name, sample_chunk):
         return False
 
 def standardize_column_names_complete(df):
-    """Полная стандартизация названий колонок"""
+    """Полная стандартизация названий колонок с обработкой дубликатов"""
     column_mapping = {}
+    used_names = set()
     
     for col in df.columns:
         col_lower = str(col).lower().strip()
@@ -212,18 +283,38 @@ def standardize_column_names_complete(df):
         # Обрабатываем BOM символ и кавычки
         clean_col = col_lower.replace('\ufeff', '').replace('"', '')
         
-        if 'наименование' in clean_col and any(keyword in clean_col for keyword in ['поставщика', 'поставщик']):
-            column_mapping[col] = 'supplier_name'
-        elif 'наименование' in clean_col:
-            column_mapping[col] = 'product_name'
+        new_name = None
+        
+        if any(keyword in clean_col for keyword in ['поставщика', 'поставщик']):
+            new_name = 'supplier_name'
+        elif 'уни наименование' in clean_col or 'товар' in clean_col or 'наименование' in clean_col or 'материал2' in clean_col:
+            new_name = 'product_name'
+        elif 'код товара' in clean_col or 'артикул' in clean_col or 'код' in clean_col:
+            new_name = 'product_code'  # Отдельная колонка для кода товара
         elif 'адрес' in clean_col:
-            column_mapping[col] = 'address'
+            new_name = 'address'
         elif 'город' in clean_col:
-            column_mapping[col] = 'city'
+            new_name = 'city'
         elif 'регион' in clean_col:
-            column_mapping[col] = 'region'
+            new_name = 'region'
         elif any(keyword in clean_col for keyword in ['филиал', 'отделение']):
-            column_mapping[col] = 'branch'
+            new_name = 'branch'
+        elif 'product' in clean_col:
+            new_name = 'product_name'
+        
+        # Обрабатываем дубликаты
+        if new_name:
+            if new_name in used_names:
+                # Если имя уже используется, добавляем суффикс
+                counter = 1
+                while f"{new_name}_{counter}" in used_names:
+                    counter += 1
+                final_name = f"{new_name}_{counter}"
+            else:
+                final_name = new_name
+            
+            column_mapping[col] = final_name
+            used_names.add(final_name)
     
     if column_mapping:
         df = df.rename(columns=column_mapping)
@@ -236,10 +327,12 @@ def safe_to_sql_fixed(df, table_name, engine, schema='x5', if_exists='append'):
     try:
         # Убедимся, что все значения строковые и не слишком длинные
         for col in df.columns:
-            df[col] = df[col].astype(str).str.slice(0, 250)  # Ограничиваем длину
+            # Проверяем, что колонка существует и преобразуем в строку
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.slice(0, 250)  # Ограничиваем длину
         
         # Разбиваем на очень маленькие части для избежания ошибки параметров
-        batch_size = 1000  # Уменьшили размер батча
+        batch_size = 1000
         total_batches = (len(df) + batch_size - 1) // batch_size
         
         for i in range(0, len(df), batch_size):
@@ -250,7 +343,7 @@ def safe_to_sql_fixed(df, table_name, engine, schema='x5', if_exists='append'):
                 schema=schema,
                 if_exists=if_exists if i == 0 else 'append',
                 index=False,
-                method=None  # Убираем method='multi' чтобы избежать ошибки параметров
+                method=None
             )
             logging.info(f"Успешно вставлен батч {i//batch_size + 1}/{total_batches}")
         
@@ -379,7 +472,6 @@ def enrich_data_complete(df, ml_models):
         # Логируем результат
         added_columns = [col for col in df.columns if 'predicted' in col or 'extracted' in col]
         logging.info(f"Обогащение завершено. Добавлено колонок: {len(added_columns)}")
-        logging.info(f"Добавленные колонки: {added_columns}")
         
         return df
 
@@ -392,8 +484,8 @@ def process_csv_with_all_models(file_path, engine, table_name):
     try:
         logging.info(f"Начинаем обработку со ВСЕМИ моделями: {file_path}")
         
-        # Загружаем ВСЕ модели
-        ml_models = load_all_models()
+        # Загружаем ВСЕ модели С ФАЙЛОВЫМ КЭШИРОВАНИЕМ
+        ml_models = load_all_models_cached()
         
         chunk_count = 0
         total_rows = 0
@@ -458,13 +550,22 @@ def scan_files():
     """Сканирует CSV файлы с префиксом x5_ в директории"""
     csv_files = []
     try:
-        for file in os.listdir(DATA_DIR):
-            if file.startswith('x5_') and file.endswith('.csv'):
-                file_path = os.path.join(DATA_DIR, file)
-                if os.path.isfile(file_path):
-                    csv_files.append(file_path)
+        logging.info(f"=== СКАНИРУЕМ ПАПКУ {DATA_DIR} ===")
         
-        logging.info(f"Найдено {len(csv_files)} CSV файлов: {[os.path.basename(f) for f in csv_files]}")
+        if not os.path.exists(DATA_DIR):
+            logging.error(f"Папка {DATA_DIR} не существует!")
+            return []
+        
+        all_files = os.listdir(DATA_DIR)
+        logging.info(f"Все файлы в папке: {all_files}")
+        
+        for file in all_files:
+            file_path = os.path.join(DATA_DIR, file)
+            if file.startswith('x5_') and file.endswith('.csv') and os.path.isfile(file_path):
+                csv_files.append(file_path)
+                logging.info(f"✅ Найден файл: {file}")
+        
+        logging.info(f"Итого найдено файлов: {len(csv_files)}")
         return csv_files
         
     except Exception as e:
@@ -474,6 +575,8 @@ def scan_files():
 @task
 def process_file_complete(file_path):
     """Обработка файла со ВСЕМИ моделями"""
+    logging.info(f"=== ОБРАБОТКА ФАЙЛА: {file_path} ===")
+    
     if not os.path.exists(file_path):
         logging.error(f"Файл не найден: {file_path}")
         return
@@ -483,7 +586,7 @@ def process_file_complete(file_path):
     table_name = re.sub(r'[^a-zA-Z0-9_]', '_', original_filename.lower())
     
     try:
-        logging.info(f"=== НАЧАЛО ПОЛНОЙ ОБРАБОТКИ {file_path} ===")
+        logging.info(f"=== НАЧАЛО ОБРАБОТКИ {file_path} ===")
         
         # Используем обработку со всеми моделями
         chunk_count, total_rows = process_csv_with_all_models(file_path, engine, table_name)
@@ -500,32 +603,32 @@ def process_file_complete(file_path):
                     count_in_db = result.scalar()
                     logging.info(f"ПРОВЕРКА: В таблице x5.{table_name} сейчас {count_in_db} строк")
                     
-                    # Проверяем несколько записей
-                    sample_result = conn.execute(text(f"SELECT TOP 3 product_name, brand_predicted, city_predicted FROM x5.{table_name}"))
-                    sample_rows = sample_result.fetchall()
-                    logging.info("ПРИМЕРЫ ДАННЫХ:")
-                    for row in sample_rows:
-                        logging.info(f"  Продукт: {row[0]}, Бренд: {row[1]}, Город: {row[2]}")
-                        
             except Exception as e:
                 logging.warning(f"Не удалось проверить данные в БД: {e}")
+            
+            # АРХИВАЦИЯ
+            if archive_file(file_path):
+                logging.info(f"Файл перемещен в архив: {file_path}")
+                
         else:
             logging.error(f"=== ПРОВАЛ: Файл {file_path} не обработан ===")
+            archive_file(file_path)
         
     except Exception as e:
-        logging.error(f"КРИТИЧЕСКАЯ ОШИБКА обработки {file_path}: {str(e)}")
+        logging.error(f"Ошибка обработки {file_path}: {str(e)}")
+        archive_file(file_path)
         raise
     finally:
         engine.dispose()
 
 with DAG(
-    dag_id="x5_sales_pipeline_complete",
+    dag_id="x5_sales_pipeline",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
     schedule_interval="@daily",
     catchup=False,
     max_active_tasks=1,
-    tags=["x5", "complete", "all_models"],
+    tags=["x5"],
 ) as dag:
 
     start = EmptyOperator(task_id="start")
