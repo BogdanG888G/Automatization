@@ -280,51 +280,7 @@ def create_table_if_not_exists(engine, table_name, sample_chunk):
 
 def standardize_column_names_complete(df):
     """Полная стандартизация названий колонок с обработкой дубликатов"""
-    column_mapping = {}
-    used_names = set()
-    
-    for col in df.columns:
-        col_lower = str(col).lower().strip()
-        
-        # Обрабатываем BOM символ и кавычки
-        clean_col = col_lower.replace('\ufeff', '').replace('"', '')
-        
-        new_name = None
-        
-        if any(keyword in clean_col for keyword in ['поставщика', 'поставщик']):
-            new_name = 'supplier_name'
-        elif 'уни наименование' in clean_col or 'товар' in clean_col or 'наименование' in clean_col or 'материал2' in clean_col:
-            new_name = 'product_name'
-        elif 'код товара' in clean_col or 'артикул' in clean_col or 'код' in clean_col:
-            new_name = 'product_code'  # Отдельная колонка для кода товара
-        elif 'адрес' in clean_col:
-            new_name = 'address'
-        elif 'город' in clean_col:
-            new_name = 'city'
-        elif 'регион' in clean_col:
-            new_name = 'region'
-        elif any(keyword in clean_col for keyword in ['филиал', 'отделение']):
-            new_name = 'branch'
-        elif 'product' in clean_col:
-            new_name = 'product_name'
-        
-        # Обрабатываем дубликаты
-        if new_name:
-            if new_name in used_names:
-                # Если имя уже используется, добавляем суффикс
-                counter = 1
-                while f"{new_name}_{counter}" in used_names:
-                    counter += 1
-                final_name = f"{new_name}_{counter}"
-            else:
-                final_name = new_name
-            
-            column_mapping[col] = final_name
-            used_names.add(final_name)
-    
-    if column_mapping:
-        df = df.rename(columns=column_mapping)
-        logging.info(f"Переименованы колонки: {column_mapping}")
+    logging.info('Пропускаем')
     
     return df
 
